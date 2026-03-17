@@ -1,5 +1,6 @@
 """
 Agent Andrea - Wegest Direct Booking Service
+Login uses AJAX - we intercept the response to detect success
 """
 
 from fastapi import FastAPI, HTTPException, Request
@@ -43,7 +44,7 @@ async def run_wegest_booking(request: BookingRequest) -> dict:
     WEGEST_PASSWORD = os.environ.get("WEGEST_PASSWORD", "")
     LOGIN_URL       = "https://www.i-salon.eu/login/default.asp?login=&"
 
-    logger.info(f"Using username: '{WEGEST_USER}' (password length: {len(WEGEST_PASSWORD)})")
+    logger.info(f"Username: '{WEGEST_USER}' | Password length: {len(WEGEST_PASSWORD)}")
 
     async with async_playwright() as p:
         browser = await p.chromium.launch(
@@ -66,81 +67,88 @@ async def run_wegest_booking(request: BookingRequest) -> dict:
             logger.info("Step 2: Filling credentials...")
             await page.fill("input[name='username']", WEGEST_USER)
             await page.fill("input[name='password']", WEGEST_PASSWORD)
-
-            # Make sure codice hidden field is set to 1
             await page.evaluate("document.querySelector('input[name=\"codice\"]').value = '1'")
-            logger.info("Credentials filled, codice set to 1")
+            logger.info("Credentials filled")
 
-            # ── STEP 3: Submit login ──────────────────────────
-            logger.info("Step 3: Submitting login...")
+            # ── STEP 3: Submit and wait for AJAX response ─────
+            logger.info("Step 3: Submitting login via AJAX...")
 
-            # Try multiple submission methods
-            # Method A: Click the div.button
-            try:
-                await page.click("div.button", timeout=3000)
-                logger.info("Clicked div.button")
-            except:
-                logger.warning("div.button click failed, trying alternatives...")
+            # Listen for network responses to detect login success/failure
+            login_response_data = {}
 
-            # Wait and check if we moved away from login
-            await page.wait_for_timeout(3000)
-            url_after_click = page.url
-            logger.info(f"URL after click: {url_after_click}")
+            async def handle_response(response):
+                url = response.url
+                if "login" in url.lower() or "accedi" in url.lower() or "auth" in url.lower():
+                    try:
+                        text = await response.text()
+                        logger.info(f"Login response URL: {url}")
+                        logger.info(f"Login response: {text[:300]}")
+                        login_response_data["url"] = url
+                        login_response_data["body"] = text
+                    except:
+                        pass
 
-            # If still on login page, try JavaScript form submit
-            if "login" in url_after_click.lower():
-                logger.info("Still on login — trying JS form submit...")
-                await page.evaluate("""
-                    () => {
-                        const form = document.querySelector('form.pannello_login_form');
-                        if (form) {
-                            // Try clicking the button via JS
-                            const btn = document.querySelector('div.button');
-                            if (btn) btn.click();
-                        }
+            page.on("response", handle_response)
+
+            # Click the login div button
+            await page.click("div.button")
+            logger.info("Login button clicked")
+
+            # Wait for AJAX to complete
+            await page.wait_for_timeout(4000)
+
+            # Check if the hidden wrapper_contents/wrapper_menu appeared
+            # Wegest shows wrapper_menu after successful login
+            wrapper_visible = await page.evaluate("""
+                () => {
+                    const menu = document.getElementById('wrapper_menu') || 
+                                 document.querySelector('.wrapper_menu') ||
+                                 document.querySelector('#menu');
+                    if (menu) {
+                        const style = window.getComputedStyle(menu);
+                        return style.display !== 'none';
                     }
-                """)
-                await page.wait_for_timeout(3000)
-                logger.info(f"URL after JS click: {page.url}")
+                    return false;
+                }
+            """)
 
-            # If still on login, try dispatching click event
-            if "login" in page.url.lower():
-                logger.info("Still on login — dispatching click event...")
-                await page.evaluate("""
-                    () => {
-                        const btn = document.querySelector('div.button');
-                        if (btn) {
-                            btn.dispatchEvent(new MouseEvent('click', {bubbles: true}));
-                        }
+            logger.info(f"Menu visible after login: {wrapper_visible}")
+            logger.info(f"Login response data: {login_response_data}")
+
+            # Also check if pannello_login is now hidden
+            login_panel_hidden = await page.evaluate("""
+                () => {
+                    const panel = document.getElementById('pannello_login');
+                    if (panel) {
+                        const style = window.getComputedStyle(panel);
+                        return style.display === 'none';
                     }
-                """)
-                await page.wait_for_timeout(3000)
-                logger.info(f"URL after dispatch: {page.url}")
+                    return true; // panel not found = logged in
+                }
+            """)
 
-            # If still on login, try pressing Enter
-            if "login" in page.url.lower():
-                logger.info("Trying Enter key...")
-                await page.press("input[name='password']", "Enter")
-                await page.wait_for_load_state("networkidle", timeout=10000)
-                await page.wait_for_timeout(2000)
-                logger.info(f"URL after Enter: {page.url}")
+            logger.info(f"Login panel hidden: {login_panel_hidden}")
 
-            # Final check
-            if "login" in page.url.lower():
-                # Log what's on the page to diagnose
-                page_text = await page.inner_text("body")
-                logger.error(f"Still on login page. Page text: {page_text[:500]}")
+            # Check cookie/session
+            cookies = await context.cookies()
+            cookie_names = [c['name'] for c in cookies]
+            logger.info(f"Cookies after login: {cookie_names}")
+
+            if not wrapper_visible and not login_panel_hidden:
+                # Log the page source for debugging
+                html = await page.content()
+                logger.error(f"Login may have failed. Page excerpt: {html[1000:2000]}")
                 raise Exception(
-                    f"Login failed — credentials may be wrong. "
-                    f"Username: '{WEGEST_USER}', "
-                    f"Password length: {len(WEGEST_PASSWORD)}. "
-                    f"URL: {page.url}"
+                    f"Login failed. Menu not visible, login panel still showing. "
+                    f"Username: '{WEGEST_USER}'. Check credentials in Railway variables."
                 )
 
-            logger.info(f"Login SUCCESS — URL: {page.url}")
+            logger.info("Login SUCCESS!")
 
             # ── STEP 4: Navigate to Agenda ────────────────────
             logger.info("Step 4: Navigating to Agenda...")
+
+            # Wegest is a SPA — click the agenda menu item
             await page.wait_for_selector("[pannello='pannello_agenda']", timeout=10000)
             await page.click("[pannello='pannello_agenda']")
             await page.wait_for_timeout(2000)
@@ -172,11 +180,10 @@ async def run_wegest_booking(request: BookingRequest) -> dict:
                     break
                 except:
                     continue
-
             await page.wait_for_timeout(2000)
 
             # ── STEP 7: Customer search ───────────────────────
-            logger.info(f"Step 7: Customer search: {request.customer_name}...")
+            logger.info(f"Step 7: Customer: {request.customer_name}...")
             try:
                 await page.wait_for_selector("input[name='cerca_cliente']", timeout=8000)
                 first_name = request.customer_name.strip().split()[0]
@@ -210,34 +217,32 @@ async def run_wegest_booking(request: BookingRequest) -> dict:
                         if save: await save.click()
                         await page.wait_for_timeout(1500)
             except Exception as e:
-                logger.warning(f"Customer step issue: {e}")
+                logger.warning(f"Customer step: {e}")
 
             await page.wait_for_timeout(1000)
 
             # ── STEP 8: Select service ────────────────────────
-            logger.info(f"Step 8: Selecting service: {request.service}...")
+            logger.info(f"Step 8: Service: {request.service}...")
             keywords = request.service.lower().split()
             els = await page.query_selector_all(".pulsanti_tab .servizi button, .servizi button")
             for el in els:
                 text = (await el.inner_text()).lower()
                 if any(k in text for k in keywords):
                     await el.click()
-                    logger.info(f"Service: {text.strip()}")
+                    logger.info(f"Service selected: {text.strip()}")
                     break
-
             await page.wait_for_timeout(1000)
 
             # ── STEP 9: Select operator ───────────────────────
             if request.operator_preference.lower() != "prima disponibile":
-                logger.info(f"Step 9: Selecting operator: {request.operator_preference}...")
+                logger.info(f"Step 9: Operator: {request.operator_preference}...")
                 ops = await page.query_selector_all(".pulsanti_tab .operatori button, .operatori button")
                 for op in ops:
                     text = (await op.inner_text()).lower()
                     if request.operator_preference.lower() in text:
                         await op.click()
-                        logger.info(f"Operator: {text.strip()}")
+                        logger.info(f"Operator selected: {text.strip()}")
                         break
-
             await page.wait_for_timeout(1000)
 
             # ── STEP 10: Add appointment ──────────────────────

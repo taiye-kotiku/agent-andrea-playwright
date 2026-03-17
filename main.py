@@ -31,11 +31,8 @@ async def health():
 @app.post("/book")
 async def book_appointment(request: Request, booking: BookingRequest):
     auth = request.headers.get("Authorization") or request.headers.get("authorization") or ""
-    logger.info(f"Auth received: '{auth}' | Expected: 'Bearer {API_SECRET}'")
-
     if auth != f"Bearer {API_SECRET}":
         raise HTTPException(status_code=401, detail="Unauthorized")
-
     logger.info(f"Booking: {booking.customer_name} | {booking.service} | {booking.preferred_date} {booking.preferred_time}")
     result = await run_wegest_booking(booking)
     return result
@@ -45,6 +42,8 @@ async def run_wegest_booking(request: BookingRequest) -> dict:
     WEGEST_USER     = os.environ.get("WEGEST_USERNAME", "")
     WEGEST_PASSWORD = os.environ.get("WEGEST_PASSWORD", "")
     LOGIN_URL       = "https://www.i-salon.eu/login/default.asp?login=&"
+
+    logger.info(f"Using username: '{WEGEST_USER}' (password length: {len(WEGEST_PASSWORD)})")
 
     async with async_playwright() as p:
         browser = await p.chromium.launch(
@@ -63,38 +62,85 @@ async def run_wegest_booking(request: BookingRequest) -> dict:
             await page.goto(LOGIN_URL, wait_until="networkidle", timeout=30000)
             await page.wait_for_timeout(2000)
 
-            # ── STEP 2: Fill login form ───────────────────────
-            logger.info("Step 2: Filling login form...")
-
-            # From HTML: input[name='username'] and input[name='password']
+            # ── STEP 2: Fill credentials ──────────────────────
+            logger.info("Step 2: Filling credentials...")
             await page.fill("input[name='username']", WEGEST_USER)
             await page.fill("input[name='password']", WEGEST_PASSWORD)
-            logger.info("Credentials filled")
 
-            # ── STEP 3: Click login button ────────────────────
-            # From HTML: <div class="button">Accedi</div> — NOT a <button> tag!
-            logger.info("Step 3: Clicking login button...")
-            await page.click("div.button")
-            logger.info("Login button clicked")
+            # Make sure codice hidden field is set to 1
+            await page.evaluate("document.querySelector('input[name=\"codice\"]').value = '1'")
+            logger.info("Credentials filled, codice set to 1")
 
-            # Wait for redirect after login
-            await page.wait_for_load_state("networkidle", timeout=20000)
+            # ── STEP 3: Submit login ──────────────────────────
+            logger.info("Step 3: Submitting login...")
+
+            # Try multiple submission methods
+            # Method A: Click the div.button
+            try:
+                await page.click("div.button", timeout=3000)
+                logger.info("Clicked div.button")
+            except:
+                logger.warning("div.button click failed, trying alternatives...")
+
+            # Wait and check if we moved away from login
             await page.wait_for_timeout(3000)
-            logger.info(f"After login URL: {page.url}")
-            logger.info(f"Page title: {await page.title()}")
+            url_after_click = page.url
+            logger.info(f"URL after click: {url_after_click}")
 
-            # Check if login succeeded
-            current_url = page.url
-            if "login" in current_url.lower():
-                # Still on login page — login failed
-                raise Exception(f"Login failed — still on login page. Check credentials. URL: {current_url}")
+            # If still on login page, try JavaScript form submit
+            if "login" in url_after_click.lower():
+                logger.info("Still on login — trying JS form submit...")
+                await page.evaluate("""
+                    () => {
+                        const form = document.querySelector('form.pannello_login_form');
+                        if (form) {
+                            // Try clicking the button via JS
+                            const btn = document.querySelector('div.button');
+                            if (btn) btn.click();
+                        }
+                    }
+                """)
+                await page.wait_for_timeout(3000)
+                logger.info(f"URL after JS click: {page.url}")
 
-            logger.info("Login successful!")
+            # If still on login, try dispatching click event
+            if "login" in page.url.lower():
+                logger.info("Still on login — dispatching click event...")
+                await page.evaluate("""
+                    () => {
+                        const btn = document.querySelector('div.button');
+                        if (btn) {
+                            btn.dispatchEvent(new MouseEvent('click', {bubbles: true}));
+                        }
+                    }
+                """)
+                await page.wait_for_timeout(3000)
+                logger.info(f"URL after dispatch: {page.url}")
 
-            # ── STEP 4: Click Agenda in sidebar ──────────────
+            # If still on login, try pressing Enter
+            if "login" in page.url.lower():
+                logger.info("Trying Enter key...")
+                await page.press("input[name='password']", "Enter")
+                await page.wait_for_load_state("networkidle", timeout=10000)
+                await page.wait_for_timeout(2000)
+                logger.info(f"URL after Enter: {page.url}")
+
+            # Final check
+            if "login" in page.url.lower():
+                # Log what's on the page to diagnose
+                page_text = await page.inner_text("body")
+                logger.error(f"Still on login page. Page text: {page_text[:500]}")
+                raise Exception(
+                    f"Login failed — credentials may be wrong. "
+                    f"Username: '{WEGEST_USER}', "
+                    f"Password length: {len(WEGEST_PASSWORD)}. "
+                    f"URL: {page.url}"
+                )
+
+            logger.info(f"Login SUCCESS — URL: {page.url}")
+
+            # ── STEP 4: Navigate to Agenda ────────────────────
             logger.info("Step 4: Navigating to Agenda...")
-
-            # From Wegest HTML: <div class="pulsante_menu" pannello="pannello_agenda">
             await page.wait_for_selector("[pannello='pannello_agenda']", timeout=10000)
             await page.click("[pannello='pannello_agenda']")
             await page.wait_for_timeout(2000)
@@ -107,194 +153,106 @@ async def run_wegest_booking(request: BookingRequest) -> dict:
             month = target_date.month
             year  = target_date.year
 
-            # From Wegest HTML: <div class="data Martedi aperto" giorno="17" mese="3" anno="2026">
             date_selector = f".data[giorno='{day}'][mese='{month}'][anno='{year}']"
             await page.wait_for_selector(date_selector, timeout=10000)
             await page.click(date_selector)
             await page.wait_for_timeout(2000)
             logger.info(f"Date selected: {request.preferred_date}")
 
-            # ── STEP 6: Click time slot on agenda grid ────────
+            # ── STEP 6: Click time slot ───────────────────────
             logger.info(f"Step 6: Clicking time slot {request.preferred_time}...")
-
-            # Parse time
-            time_parts = request.preferred_time.split(":")
-            hour   = int(time_parts[0])
-            minute = int(time_parts[1]) if len(time_parts) > 1 else 0
-
-            # Try clicking directly on a grid cell at the right time
-            # Wegest renders the agenda as a grid — we look for cells by time
             time_selectors = [
                 f"[data-ora='{request.preferred_time}']",
-                f"[data-ora='{hour:02d}:{minute:02d}']",
-                f".griglia_orario [ora='{hour:02d}:{minute:02d}']",
-                f".operatori_orari [data-time='{request.preferred_time}']",
+                f"[data-time='{request.preferred_time}']",
             ]
-
-            slot_clicked = False
             for sel in time_selectors:
                 try:
                     await page.click(sel, timeout=3000)
-                    slot_clicked = True
                     logger.info(f"Time slot clicked: {sel}")
                     break
                 except:
                     continue
 
-            if not slot_clicked:
-                logger.warning("Could not find time slot by data attribute — agenda grid may use different structure")
-
             await page.wait_for_timeout(2000)
 
-            # ── STEP 7: Handle customer search modal ──────────
-            logger.info(f"Step 7: Searching for customer: {request.customer_name}...")
-
-            # Wegest opens cerca_cliente modal after clicking time slot
-            # From HTML: input[name='cerca_cliente'] placeholder="Search by customer name or mobile phone"
+            # ── STEP 7: Customer search ───────────────────────
+            logger.info(f"Step 7: Customer search: {request.customer_name}...")
             try:
-                await page.wait_for_selector(
-                    "input[name='cerca_cliente']",
-                    timeout=8000
-                )
-                search_input = await page.query_selector("input[name='cerca_cliente']")
+                await page.wait_for_selector("input[name='cerca_cliente']", timeout=8000)
+                first_name = request.customer_name.strip().split()[0]
+                await page.fill("input[name='cerca_cliente']", first_name)
+                await page.wait_for_timeout(1500)
 
-                if search_input:
-                    first_name = request.customer_name.strip().split()[0]
-                    await search_input.fill(first_name)
-                    await page.wait_for_timeout(1500)
-                    logger.info(f"Searching for: {first_name}")
+                results = await page.query_selector_all(".modale_body button.rimira")
+                found = False
+                for r in results:
+                    text = (await r.inner_text()).lower()
+                    if first_name.lower() in text:
+                        await r.click()
+                        found = True
+                        logger.info(f"Customer found: {text.strip()}")
+                        break
 
-                    # Look for customer in results
-                    customer_results = await page.query_selector_all(
-                        ".modale_body button.rimira, "
-                        ".modale_body .button.rimira"
-                    )
-
-                    customer_found = False
-                    for result in customer_results:
-                        try:
-                            text = (await result.inner_text()).lower()
-                            if first_name.lower() in text:
-                                await result.click()
-                                customer_found = True
-                                logger.info(f"Customer selected: {text.strip()}")
-                                break
-                        except:
-                            continue
-
-                    # Create new customer if not found
-                    if not customer_found:
-                        logger.info("Customer not found — creating new...")
-
-                        # From HTML: button.primary "New Customer" / "Nuovo Cliente"
-                        new_btn = await page.query_selector(
-                            ".pulsanti button.primary, "
-                            "button:has-text('Nuovo Cliente'), "
-                            "button:has-text('New Customer')"
-                        )
-                        if new_btn:
-                            await new_btn.click()
-                            await page.wait_for_timeout(1500)
-
-                            name_parts = request.customer_name.strip().split(" ", 1)
-
-                            # Wegest new customer fields
-                            nome_field    = await page.query_selector("input[name='Nome']")
-                            cognome_field = await page.query_selector("input[name='Cognome']")
-                            cell_field    = await page.query_selector(
-                                "input[name='Cellulare1'], input[name='cellulare']"
-                            )
-
-                            if nome_field:
-                                await nome_field.fill(name_parts[0])
-                                logger.info(f"First name filled: {name_parts[0]}")
-                            if cognome_field and len(name_parts) > 1:
-                                await cognome_field.fill(name_parts[1])
-                                logger.info(f"Last name filled: {name_parts[1]}")
-                            if cell_field:
-                                await cell_field.fill(request.caller_phone)
-                                logger.info(f"Phone filled: {request.caller_phone}")
-
-                            # Save new customer
-                            save_btn = await page.query_selector(
-                                ".pulsanti button.primary, "
-                                "button.rimira.primary"
-                            )
-                            if save_btn:
-                                await save_btn.click()
-                                await page.wait_for_timeout(1500)
-                                logger.info("New customer saved")
-
+                if not found:
+                    logger.info("Creating new customer...")
+                    new_btn = await page.query_selector(".pulsanti button.primary")
+                    if new_btn:
+                        await new_btn.click()
+                        await page.wait_for_timeout(1500)
+                        parts = request.customer_name.strip().split(" ", 1)
+                        nome = await page.query_selector("input[name='Nome']")
+                        cognome = await page.query_selector("input[name='Cognome']")
+                        cell = await page.query_selector("input[name='Cellulare1']")
+                        if nome: await nome.fill(parts[0])
+                        if cognome and len(parts) > 1: await cognome.fill(parts[1])
+                        if cell: await cell.fill(request.caller_phone)
+                        save = await page.query_selector(".pulsanti button.primary")
+                        if save: await save.click()
+                        await page.wait_for_timeout(1500)
             except Exception as e:
-                logger.warning(f"Customer search modal issue: {str(e)}")
+                logger.warning(f"Customer step issue: {e}")
 
             await page.wait_for_timeout(1000)
 
             # ── STEP 8: Select service ────────────────────────
             logger.info(f"Step 8: Selecting service: {request.service}...")
-            service_keywords = request.service.lower().split()
-
-            # From Wegest HTML: services are in .pulsanti_tab .servizi
-            service_elements = await page.query_selector_all(
-                ".pulsanti_tab .servizi button, "
-                ".servizi button"
-            )
-
-            service_selected = False
-            for el in service_elements:
-                try:
-                    text = (await el.inner_text()).lower()
-                    if any(kw in text for kw in service_keywords):
-                        await el.click()
-                        service_selected = True
-                        logger.info(f"Service selected: {text.strip()}")
-                        break
-                except:
-                    continue
-
-            if not service_selected:
-                logger.warning(f"Service '{request.service}' not matched — check exact service names in Wegest")
+            keywords = request.service.lower().split()
+            els = await page.query_selector_all(".pulsanti_tab .servizi button, .servizi button")
+            for el in els:
+                text = (await el.inner_text()).lower()
+                if any(k in text for k in keywords):
+                    await el.click()
+                    logger.info(f"Service: {text.strip()}")
+                    break
 
             await page.wait_for_timeout(1000)
 
             # ── STEP 9: Select operator ───────────────────────
-            logger.info(f"Step 9: Selecting operator: {request.operator_preference}...")
-
             if request.operator_preference.lower() != "prima disponibile":
-                op_elements = await page.query_selector_all(
-                    ".pulsanti_tab .operatori button, "
-                    ".operatori button"
-                )
-                for el in op_elements:
-                    try:
-                        text = (await el.inner_text()).lower()
-                        if request.operator_preference.lower() in text:
-                            await el.click()
-                            logger.info(f"Operator selected: {text.strip()}")
-                            break
-                    except:
-                        continue
+                logger.info(f"Step 9: Selecting operator: {request.operator_preference}...")
+                ops = await page.query_selector_all(".pulsanti_tab .operatori button, .operatori button")
+                for op in ops:
+                    text = (await op.inner_text()).lower()
+                    if request.operator_preference.lower() in text:
+                        await op.click()
+                        logger.info(f"Operator: {text.strip()}")
+                        break
 
             await page.wait_for_timeout(1000)
 
-            # ── STEP 10: Confirm appointment ──────────────────
-            logger.info("Step 10: Confirming appointment...")
-
-            # From Wegest HTML: button.aggiungi "Aggiungi appuntamento"
+            # ── STEP 10: Add appointment ──────────────────────
+            logger.info("Step 10: Adding appointment...")
             add_selectors = [
                 ".form_appuntamento .pulsanti button.aggiungi",
                 "button.aggiungi",
-                ".pulsanti .aggiungi",
                 "button:has-text('Aggiungi appuntamento')",
-                "button:has-text('Add appointment')",
             ]
-
-            appointment_added = False
+            added = False
             for sel in add_selectors:
                 try:
                     await page.click(sel, timeout=5000)
-                    appointment_added = True
-                    logger.info(f"Appointment confirmed: {sel}")
+                    added = True
+                    logger.info(f"Appointment added: {sel}")
                     break
                 except:
                     continue
@@ -302,13 +260,11 @@ async def run_wegest_booking(request: BookingRequest) -> dict:
             await page.wait_for_load_state("networkidle", timeout=15000)
             await page.wait_for_timeout(2000)
 
-            # ── STEP 11: Verify success ───────────────────────
             content = (await page.content()).lower()
-            first_name_lower = request.customer_name.lower().split()[0]
-            success = first_name_lower in content or appointment_added
+            success = request.customer_name.lower().split()[0] in content or added
 
             await browser.close()
-            logger.info(f"Result: {'SUCCESS' if success else 'UNCERTAIN — check Wegest'}")
+            logger.info(f"Result: {'SUCCESS' if success else 'UNCERTAIN'}")
 
             return {
                 "success": success,
@@ -317,17 +273,13 @@ async def run_wegest_booking(request: BookingRequest) -> dict:
                 "date": request.preferred_date,
                 "time": request.preferred_time,
                 "operator": request.operator_preference,
-                "message": "Appointment created in Wegest agenda" if success else "Submitted — please verify in Wegest"
+                "message": "Appointment created in Wegest" if success else "Submitted — verify in Wegest"
             }
 
         except Exception as e:
-            logger.error(f"Automation error: {str(e)}")
+            logger.error(f"Error: {str(e)}")
             try:
                 await browser.close()
             except:
                 pass
-            return {
-                "success": False,
-                "error": str(e),
-                "message": "Wegest booking automation failed"
-            }
+            return {"success": False, "error": str(e), "message": "Wegest booking automation failed"}

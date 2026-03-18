@@ -163,7 +163,7 @@ async def run_wegest_booking(request: BookingRequest) -> dict:
                     }""",
                     timeout=60000
                 )
-            except:
+            except Exception:
                 pass
             await page.wait_for_timeout(30000)
             await snap(page, "03_logged_in")
@@ -204,8 +204,8 @@ async def run_wegest_booking(request: BookingRequest) -> dict:
             date_selector = f".data[giorno='{day}'][mese='{month}'][anno='{year}']"
             try:
                 await page.click(date_selector, timeout=10000)
-                logger.info(f"✅ Date clicked")
-            except Exception as e:
+                logger.info("✅ Date clicked")
+            except Exception:
                 raise Exception(f"Date {day}/{month}/{year} not visible on calendar")
 
             logger.info("Waiting for grid...")
@@ -214,7 +214,7 @@ async def run_wegest_booking(request: BookingRequest) -> dict:
                     f"() => document.querySelectorAll(\".cella[giorno='{day}'][mese='{month}'][anno='{year}']\").length > 0",
                     timeout=15000
                 )
-            except:
+            except Exception:
                 await page.click(date_selector, timeout=5000)
                 await page.wait_for_timeout(5000)
 
@@ -246,7 +246,7 @@ async def run_wegest_booking(request: BookingRequest) -> dict:
                     await page.click(exact_sel, timeout=5000)
                     time_clicked = True
                     logger.info(f"✅ Exact slot: {hour}:{minute}")
-            except:
+            except Exception:
                 pass
 
             # Try any minute at this hour
@@ -259,7 +259,7 @@ async def run_wegest_booking(request: BookingRequest) -> dict:
                         actual_time = f"{hour}:{actual_min or '0'}"
                         time_clicked = True
                         logger.info(f"✅ Hour fallback: {actual_time}")
-                except:
+                except Exception:
                     pass
 
             # Try next hours
@@ -275,7 +275,7 @@ async def run_wegest_booking(request: BookingRequest) -> dict:
                             time_clicked = True
                             logger.info(f"✅ Next available: {actual_time}")
                             break
-                    except:
+                    except Exception:
                         continue
 
             if not time_clicked:
@@ -286,9 +286,6 @@ async def run_wegest_booking(request: BookingRequest) -> dict:
 
             # ═══════════════════════════════════════════
             # STEP 7: Customer search & selection
-            # Search: full name → first → last → phone
-            # Match: requires BOTH first AND last name
-            # No match: create new customer
             # ═══════════════════════════════════════════
             logger.info(f"Step 7: Customer '{request.customer_name}'...")
             customer_found = False
@@ -313,7 +310,7 @@ async def run_wegest_booking(request: BookingRequest) -> dict:
                 )
                 logger.info("✅ Customer search modal open")
 
-                # Match logic: BOTH first AND last name required
+                # Match logic: requires BOTH first AND last name
                 match_js = f"""
                     () => {{
                         const first = '{first_safe}';
@@ -337,7 +334,7 @@ async def run_wegest_booking(request: BookingRequest) -> dict:
                             for (const r of results) {{
                                 if (r.hasFirst && r.hasLast) {{
                                     document.getElementById(r.id).click();
-                                    return {{ found: true, ...r, method: 'both_names' }};
+                                    return {{ found: true, id: r.id, name: r.name, method: 'both_names' }};
                                 }}
                             }}
                         }}
@@ -345,7 +342,7 @@ async def run_wegest_booking(request: BookingRequest) -> dict:
                             for (const r of results) {{
                                 if (r.hasFirst) {{
                                     document.getElementById(r.id).click();
-                                    return {{ found: true, ...r, method: 'first_only' }};
+                                    return {{ found: true, id: r.id, name: r.name, method: 'first_only' }};
                                 }}
                             }}
                         }}
@@ -417,106 +414,83 @@ async def run_wegest_booking(request: BookingRequest) -> dict:
                     await page.wait_for_timeout(500)
 
                     # Click "New Customer" in search modal
-                    await page.click(".cerca_cliente .pulsanti .button.rimira.primary.aggiungi")
+                    # Verified: .cerca_cliente .pulsanti .button.rimira.primary.aggiungi
+                    await page.evaluate("""
+                        () => {
+                            const btn = document.querySelector(
+                                '.cerca_cliente .pulsanti .button.rimira.primary.aggiungi'
+                            );
+                            if (btn) btn.click();
+                        }
+                    """)
                     await page.wait_for_timeout(3000)
                     await snap(page, "07e_new_form")
 
                     # Fill Nome
+                    # Verified: input[name='nome'] inside .form_cliente
                     await page.evaluate(f"""
                         () => {{
-                            const inputs = document.querySelectorAll('input[name="nome"]');
-                            for (const inp of inputs) {{
-                                if (inp.offsetParent === null) continue;
+                            const inp = document.querySelector('.form_cliente input[name="nome"]');
+                            if (inp) {{
                                 inp.value = '{js_escape(first_name)}';
                                 inp.dispatchEvent(new Event('input', {{bubbles:true}}));
                                 inp.dispatchEvent(new Event('change', {{bubbles:true}}));
-                                return true;
                             }}
-                            return false;
                         }}
                     """)
 
                     # Fill Cognome
+                    # Verified: input[name='cognome'] inside .form_cliente
                     await page.evaluate(f"""
                         () => {{
-                            const inputs = document.querySelectorAll('input[name="cognome"]');
-                            for (const inp of inputs) {{
-                                if (inp.offsetParent === null) continue;
+                            const inp = document.querySelector('.form_cliente input[name="cognome"]');
+                            if (inp) {{
                                 inp.value = '{js_escape(last_name)}';
                                 inp.dispatchEvent(new Event('input', {{bubbles:true}}));
                                 inp.dispatchEvent(new Event('change', {{bubbles:true}}));
-                                return true;
                             }}
-                            return false;
                         }}
                     """)
 
-                    # Fill Cellulare (skip inserisci_cellulare modal)
+                    # Fill Cellulare
+                    # Verified: input[name='cellulare'] inside .form_cliente
                     await page.evaluate(f"""
                         () => {{
-                            const inputs = document.querySelectorAll('input[name="cellulare"]');
-                            for (const inp of inputs) {{
-                                if (inp.offsetParent === null) continue;
-                                if (inp.closest('.inserisci_cellulare')) continue;
+                            const inp = document.querySelector('.form_cliente input[name="cellulare"]');
+                            if (inp) {{
                                 inp.value = '{phone_safe}';
                                 inp.dispatchEvent(new Event('input', {{bubbles:true}}));
                                 inp.dispatchEvent(new Event('change', {{bubbles:true}}));
-                                return true;
                             }}
-                            return false;
                         }}
                     """)
 
                     logger.info(f"  Filled: {first_name} {last_name} / {search_phone}")
                     await snap(page, "07f_filled")
 
-                    # Click "Add customer" in modale_footer
-                    # NOT .azioni (that's "Add appointment")
-                    # Click "Add customer" in modale_footer
-                    # Use Playwright click — more reliable than JS evaluate
-                    try:
-                        await page.click(
-                            ".modale_footer .button.rimira.primary.aggiungi",
-                            timeout=5000
-                        )
-                        customer_found = True
-                        logger.info("✅ New customer created (playwright click)")
-                    except Exception as click_err:
-                        logger.warning(f"Playwright click failed: {click_err}")
-                        # JS fallback with better visibility check
-                        saved = await page.evaluate("""
-                            () => {
-                                const btns = document.querySelectorAll(
-                                    '.modale_footer .button.rimira.primary.aggiungi'
-                                );
-                                for (const btn of btns) {
-                                    const s = getComputedStyle(btn);
-                                    if (s.display === 'none' || s.visibility === 'hidden')
-                                        continue;
-                                    if (s.pointerEvents === 'none') continue;
-                                    btn.click();
-                                    return true;
-                                }
-                                // Broader: any visible primary aggiungi NOT in .azioni
-                                const all = document.querySelectorAll(
-                                    '.button.rimira.primary.aggiungi'
-                                );
-                                for (const btn of all) {
-                                    if (btn.closest('.azioni')) continue;
-                                    if (btn.closest('.cerca_cliente')) continue;
-                                    const s = getComputedStyle(btn);
-                                    if (s.display === 'none') continue;
-                                    btn.click();
-                                    return true;
-                                }
-                                return false;
+                    # Click "Add customer"
+                    # Verified: .form_cliente .modale_footer .button.rimira.primary.aggiungi
+                    # (btn #36 of 37 — unique inside .form_cliente container)
+                    saved = await page.evaluate("""
+                        () => {
+                            const btn = document.querySelector(
+                                '.form_cliente .modale_footer .button.rimira.primary.aggiungi'
+                            );
+                            if (btn) {
+                                btn.click();
+                                return { clicked: true, method: 'form_cliente' };
                             }
-                        """)
-                        if saved:
-                            customer_found = True
-                            logger.info("✅ New customer created (JS fallback)")
-                        else:
-                            logger.warning("⚠️ Could not click Add customer!")
+                            return { clicked: false };
+                        }
+                    """)
+
+                    logger.info(f"  Save: {saved}")
+
+                    if saved and saved.get('clicked'):
+                        customer_found = True
+                        logger.info("✅ New customer created")
+                    else:
+                        logger.warning("⚠️ Could not click Add customer!")
 
                     await page.wait_for_timeout(4000)
                     await snap(page, "07g_saved")
@@ -529,60 +503,40 @@ async def run_wegest_booking(request: BookingRequest) -> dict:
             await page.wait_for_timeout(2000)
 
             # ═══════════════════════════════════════════
-            # STEP 7.5: Phone number modal
+            # STEP 7.5: Phone number modal (if it appears)
+            # All JS evaluate — no page.fill() to avoid timeout
+            # Verified: .modale.card.inserisci_cellulare
             # ═══════════════════════════════════════════
-                    # Click "Add customer" in modale_footer
-                    # Use Playwright click — more reliable than JS evaluate
-            try:
-                await page.click(
-                    ".modale_footer .button.rimira.primary.aggiungi",
-                    timeout=5000
-                        )
-                customer_found = True
-                logger.info("✅ New customer created (playwright click)")
-            except Exception as click_err:
-                logger.warning(f"Playwright click failed: {click_err}")
-                        # JS fallback with better visibility check
-                saved = await page.evaluate("""
-                            () => {
-                                const btns = document.querySelectorAll(
-                                    '.modale_footer .button.rimira.primary.aggiungi'
-                                );
-                                for (const btn of btns) {
-                                    const s = getComputedStyle(btn);
-                                    if (s.display === 'none' || s.visibility === 'hidden')
-                                        continue;
-                                    if (s.pointerEvents === 'none') continue;
-                                    btn.click();
-                                    return true;
-                                }
-                                // Broader: any visible primary aggiungi NOT in .azioni
-                                const all = document.querySelectorAll(
-                                    '.button.rimira.primary.aggiungi'
-                                );
-                                for (const btn of all) {
-                                    if (btn.closest('.azioni')) continue;
-                                    if (btn.closest('.cerca_cliente')) continue;
-                                    const s = getComputedStyle(btn);
-                                    if (s.display === 'none') continue;
-                                    btn.click();
-                                    return true;
-                                }
-                                return false;
-                            }
-                        """)
-                if saved:
-                    customer_found = True
-                    logger.info("✅ New customer created (JS fallback)")
-                else:
-                    logger.warning("⚠️ Could not click Add customer!")
+            phone_handled = await page.evaluate(f"""
+                () => {{
+                    const m = document.querySelector('.modale.card.inserisci_cellulare');
+                    if (!m) return {{ visible: false }};
+                    if (getComputedStyle(m).display === 'none') return {{ visible: false }};
+                    const inp = m.querySelector('input[name="cellulare"]');
+                    if (inp) {{
+                        inp.value = '{phone_safe}';
+                        inp.dispatchEvent(new Event('input', {{bubbles:true}}));
+                        inp.dispatchEvent(new Event('change', {{bubbles:true}}));
+                    }}
+                    const btn = m.querySelector('.button.rimira.primary.conferma');
+                    if (btn) {{
+                        btn.click();
+                        return {{ visible: true, filled: true, confirmed: true }};
+                    }}
+                    return {{ visible: true, filled: !!inp, confirmed: false }};
+                }}
+            """)
+            if phone_handled and phone_handled.get('visible'):
+                logger.info(f"📱 Phone modal: {phone_handled}")
+                await page.wait_for_timeout(2000)
+            else:
+                logger.info("📱 No phone modal")
 
-            await page.wait_for_timeout(4000)
-            await snap(page, "07g_saved")
-            await dismiss_system_modals(page, "after-new-customer")
+            await snap(page, "08_form_ready")
 
             # ═══════════════════════════════════════════
             # STEP 8: Select service
+            # Verified: .pulsanti_tab .servizio with nome attribute
             # ═══════════════════════════════════════════
             logger.info(f"Step 8: Service '{request.service}'...")
             svc_kw = js_escape(request.service.lower())
@@ -633,7 +587,7 @@ async def run_wegest_booking(request: BookingRequest) -> dict:
                             }
                         }
                     """)
-                except:
+                except Exception:
                     pass
 
             await page.wait_for_timeout(1500)
@@ -641,6 +595,7 @@ async def run_wegest_booking(request: BookingRequest) -> dict:
 
             # ═══════════════════════════════════════════
             # STEP 9: Select operator
+            # Verified: .pulsanti_tab .operatori .operatore span.nome
             # ═══════════════════════════════════════════
             if request.operator_preference.lower() != "prima disponibile":
                 op_safe = js_escape(request.operator_preference.lower())
@@ -660,12 +615,18 @@ async def run_wegest_booking(request: BookingRequest) -> dict:
                         const avail = [];
                         ops.forEach(o => {{
                             const n = o.querySelector('span.nome');
-                            avail.push({{ name: n?.textContent.trim(), id: o.id, absent: o.classList.contains('assente') }});
+                            avail.push({{
+                                name: n ? n.textContent.trim() : '?',
+                                id: o.id,
+                                absent: o.classList.contains('assente')
+                            }});
                         }});
                         return {{ ok:0, available: avail }};
                     }}
                 """)
                 logger.info(f"Operator: {op_result}")
+            else:
+                logger.info("Step 9: Default operator")
 
             await page.wait_for_timeout(1000)
             await snap(page, "10_operator")
@@ -679,9 +640,12 @@ async def run_wegest_booking(request: BookingRequest) -> dict:
             added = await page.evaluate("""
                 () => {
                     const btn = document.querySelector('.azioni .button.rimira.primary.aggiungi');
-                    if (btn && btn.offsetParent !== null) {
-                        btn.click();
-                        return 'azioni-aggiungi';
+                    if (btn) {
+                        const rect = btn.getBoundingClientRect();
+                        if (rect.width > 0 && rect.height > 0) {
+                            btn.click();
+                            return 'azioni-aggiungi';
+                        }
                     }
                     return null;
                 }
@@ -694,7 +658,7 @@ async def run_wegest_booking(request: BookingRequest) -> dict:
                 try:
                     await page.click(".azioni .button.rimira.primary.aggiungi", timeout=5000)
                     added = "playwright"
-                except:
+                except Exception:
                     await snap(page, "10_ERROR")
 
             await page.wait_for_timeout(5000)
@@ -705,8 +669,6 @@ async def run_wegest_booking(request: BookingRequest) -> dict:
             # ═══════════════════════════════════════════
             # VERIFY
             # ═══════════════════════════════════════════
-            first_lower = js_escape(request.customer_name.lower().split()[0])
-
             on_agenda = await page.evaluate("""
                 () => {
                     const a = document.getElementById('pannello_agenda');
@@ -759,7 +721,7 @@ async def run_wegest_booking(request: BookingRequest) -> dict:
             await snap(page, "ERROR")
             try:
                 await browser.close()
-            except:
+            except Exception:
                 pass
             return {
                 "success": False,

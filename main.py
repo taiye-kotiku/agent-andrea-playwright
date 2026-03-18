@@ -1,7 +1,7 @@
 """
 Agent Andrea - Wegest Direct Booking Service
+Fixed: click ANNULLA on chiusura cassa modal (not OK PROCEDI)
 Fixed: modal buttons are DIVs not BUTTONs
-Fixed: correct selectors for Wegest modal dialog
 """
 
 from fastapi import FastAPI, HTTPException, Request
@@ -62,13 +62,14 @@ async def screenshot(page, name: str):
 
 async def dismiss_all_modals(page, label=""):
     """
-    Dismiss all Wegest modals. Loops up to 5 times to handle stacked modals.
-    Wegest uses DIV buttons, not <button> elements.
+    Dismiss all Wegest modals by clicking ANNULLA (cancel).
+    OK/PROCEDI goes to settings — we must avoid that.
+    Wegest modal buttons are DIVs, not <button> elements.
+    Loops up to 5 times to handle stacked modals.
     """
     logger.info(f"🔍 Modal sweep: {label}")
 
     for attempt in range(5):
-        # Check if the modal dialog is visible
         modal_visible = await page.evaluate("""
             () => {
                 const modal = document.getElementById('modale_dialog');
@@ -82,30 +83,33 @@ async def dismiss_all_modals(page, label=""):
             logger.info(f"  ✅ No modal visible (attempt {attempt + 1})")
             break
 
-        logger.info(f"  ⚠️ Modal detected (attempt {attempt + 1}) — dismissing...")
+        logger.info(f"  ⚠️ Modal detected (attempt {attempt + 1}) — clicking ANNULLA...")
 
-        # Priority order: click "Ok, procedi" (conferma), then "Annulla", then "Chiudi"
         clicked = await page.evaluate("""
             () => {
-                // Try "Ok, procedi" button first
-                const conferma = document.querySelector('#modale_dialog .button.conferma');
-                if (conferma && window.getComputedStyle(conferma).display !== 'none') {
-                    conferma.click();
-                    return 'conferma';
-                }
-                // Try "Chiudi" button
-                const chiudi = document.querySelector('#modale_dialog .button.chiudi');
-                if (chiudi && window.getComputedStyle(chiudi).display !== 'none') {
-                    chiudi.click();
-                    return 'chiudi';
-                }
-                // Try "Annulla" button
+                // Priority 1: Click ANNULLA (div.button.avviso) — this cancels and stays on current page
                 const annulla = document.querySelector('#modale_dialog .button.avviso');
                 if (annulla && window.getComputedStyle(annulla).display !== 'none') {
                     annulla.click();
                     return 'annulla';
                 }
-                // Last resort: hide the modal
+                // Priority 2: Click CHIUDI (close button)
+                const chiudi = document.querySelector('#modale_dialog .button.chiudi');
+                if (chiudi && window.getComputedStyle(chiudi).display !== 'none') {
+                    chiudi.click();
+                    return 'chiudi';
+                }
+                // Priority 3: Click any OK button on info/warning dialogs (not the cassa one)
+                const conferma = document.querySelector('#modale_dialog .button.conferma');
+                if (conferma && window.getComputedStyle(conferma).display !== 'none') {
+                    // Only click conferma if it's a simple warning (not chiusura cassa)
+                    const text = document.querySelector('#modale_dialog .testo1');
+                    if (text && !text.textContent.toLowerCase().includes('cassa')) {
+                        conferma.click();
+                        return 'conferma-warning';
+                    }
+                }
+                // Last resort: force hide
                 const modal = document.getElementById('modale_dialog');
                 if (modal) {
                     modal.style.display = 'none';
@@ -122,7 +126,7 @@ async def dismiss_all_modals(page, label=""):
 
         await page.wait_for_timeout(2500)
 
-    # Also check for any overlay backgrounds and remove them
+    # Remove any overlay backgrounds
     await page.evaluate("""
         () => {
             document.querySelectorAll('.modale_overlay, .overlay_modale, .overlay').forEach(el => {
@@ -229,9 +233,10 @@ async def run_wegest_booking(request: BookingRequest) -> dict:
             await screenshot(page, "04_dashboard")
 
             # ══════════════════════════════════════════════════
-            # STEP 3.5: DISMISS ALL POST-LOGIN MODALS
+            # STEP 3.5: CLICK ANNULLA ON CHIUSURA CASSA MODAL
+            # (OK PROCEDI goes to settings — we must avoid it)
             # ══════════════════════════════════════════════════
-            logger.info("Step 3.5: Clearing post-login modals...")
+            logger.info("Step 3.5: Dismissing chiusura cassa modal with ANNULLA...")
             await dismiss_all_modals(page, "post-login")
             await page.wait_for_timeout(2000)
             await screenshot(page, "04b_modals_cleared")
@@ -242,7 +247,7 @@ async def run_wegest_booking(request: BookingRequest) -> dict:
             await page.click("[pannello='pannello_agenda']")
             await page.wait_for_timeout(5000)
 
-            # Clear modals again after Agenda opens
+            # Clear any modals that appear after opening Agenda
             await dismiss_all_modals(page, "after-agenda")
             await page.wait_for_timeout(2000)
             await screenshot(page, "05_agenda_clean")
@@ -258,7 +263,7 @@ async def run_wegest_booking(request: BookingRequest) -> dict:
             date_selector = f".data[giorno='{day}'][mese='{month}'][anno='{year}']"
             logger.info(f"Date selector: {date_selector}")
 
-            # Ensure modals are clear before clicking
+            # Make sure no modals are blocking
             await dismiss_all_modals(page, "before-date")
 
             date_clicked = False
@@ -375,7 +380,7 @@ async def run_wegest_booking(request: BookingRequest) -> dict:
                     await screenshot(page, "08_customer_search")
 
                     results = await page.query_selector_all(
-                        ".modale_body button.rimira, .risultati_ricerca button, .lista_clienti button, .cliente_risultato"
+                        ".modale_body button.rimira, .risultati_ricerca button, .lista_clienti button, .cliente_risultato, div.button.rimira"
                     )
                     for r in results:
                         text = (await r.inner_text()).lower()
@@ -388,7 +393,7 @@ async def run_wegest_booking(request: BookingRequest) -> dict:
                     if not customer_found:
                         logger.info("Customer not found — creating new...")
                         new_btn = await page.query_selector(
-                            ".pulsanti button.primary, button:has-text('Nuovo'), button:has-text('nuovo')"
+                            "div.button.primary, button.primary, button:has-text('Nuovo'), div.button:has-text('Nuovo')"
                         )
                         if new_btn:
                             await new_btn.click()
@@ -404,7 +409,7 @@ async def run_wegest_booking(request: BookingRequest) -> dict:
                             if cell:
                                 await cell.fill(request.caller_phone)
                             save = await page.query_selector(
-                                ".pulsanti button.primary, button:has-text('Salva')"
+                                "div.button.primary, button.primary, button:has-text('Salva'), div.button:has-text('Salva')"
                             )
                             if save:
                                 await save.click()
@@ -426,7 +431,7 @@ async def run_wegest_booking(request: BookingRequest) -> dict:
             service_selected = False
 
             els = await page.query_selector_all(
-                ".pulsanti_tab .servizi button, .servizi button, button.servizio, .lista_servizi button"
+                ".pulsanti_tab .servizi button, .servizi button, button.servizio, .lista_servizi button, div.button.servizio"
             )
             logger.info(f"Found {len(els)} service buttons")
             for el in els:
@@ -445,10 +450,10 @@ async def run_wegest_booking(request: BookingRequest) -> dict:
                 service_kw = request.service.lower()
                 await page.evaluate(f"""
                     () => {{
-                        const buttons = document.querySelectorAll('button, div.button');
-                        for (const btn of buttons) {{
-                            if (btn.textContent.toLowerCase().includes('{service_kw}')) {{
-                                btn.click();
+                        const els = document.querySelectorAll('button, div.button, div.servizio, span');
+                        for (const el of els) {{
+                            if (el.textContent.toLowerCase().includes('{service_kw}')) {{
+                                el.click();
                                 return;
                             }}
                         }}
@@ -462,7 +467,7 @@ async def run_wegest_booking(request: BookingRequest) -> dict:
             if request.operator_preference.lower() != "prima disponibile":
                 logger.info(f"Step 9: Operator: {request.operator_preference}...")
                 ops = await page.query_selector_all(
-                    ".pulsanti_tab .operatori button, .operatori button, button.operatore, div.operatore"
+                    ".pulsanti_tab .operatori button, .operatori button, button.operatore, div.operatore, div.button.operatore"
                 )
                 for op in ops:
                     try:
@@ -479,7 +484,6 @@ async def run_wegest_booking(request: BookingRequest) -> dict:
             logger.info("Step 10: Adding appointment...")
             added = False
 
-            # Try Playwright selectors (both button and div.button)
             for sel in [
                 "button.aggiungi",
                 "div.button.aggiungi",
@@ -506,7 +510,6 @@ async def run_wegest_booking(request: BookingRequest) -> dict:
                     continue
 
             if not added:
-                # JS fallback — search both button and div.button
                 logger.info("Trying JS fallback for add button...")
                 added = await page.evaluate("""
                     () => {
@@ -515,7 +518,7 @@ async def run_wegest_booking(request: BookingRequest) -> dict:
                             const text = el.textContent.toLowerCase().trim();
                             const style = window.getComputedStyle(el);
                             if (style.display === 'none' || style.visibility === 'hidden') continue;
-                            if (text.includes('aggiungi') || text.includes('salva') || text.includes('conferma')) {
+                            if (text.includes('aggiungi') || text.includes('salva')) {
                                 el.click();
                                 return true;
                             }
@@ -527,7 +530,7 @@ async def run_wegest_booking(request: BookingRequest) -> dict:
             await page.wait_for_timeout(3000)
             await screenshot(page, "11_final_result")
 
-            # ── VERIFY: Check outcome ─────────────────────────
+            # ── VERIFY ────────────────────────────────────────
             await screenshot(page, "12_verification")
 
             page_content = (await page.content()).lower()

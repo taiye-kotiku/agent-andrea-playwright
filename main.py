@@ -1,6 +1,7 @@
 """
 Agent Andrea - Wegest Direct Booking Service
 Fixed: longer waits after login for AJAX dashboard to load
+Fixed: dismiss post-login "chiusura cassa" modal
 """
 
 from fastapi import FastAPI, HTTPException, Request
@@ -19,6 +20,7 @@ app = FastAPI(title="Agent Andrea - Wegest Booking Service")
 
 screenshots = {}
 
+
 class BookingRequest(BaseModel):
     customer_name: str
     caller_phone: str
@@ -27,11 +29,14 @@ class BookingRequest(BaseModel):
     preferred_date: str
     preferred_time: str
 
+
 API_SECRET = os.environ.get("API_SECRET", "changeme")
+
 
 @app.get("/health")
 async def health():
     return {"status": "ok", "service": "Agent Andrea Wegest Booking"}
+
 
 @app.get("/screenshots", response_class=HTMLResponse)
 async def view_screenshots():
@@ -45,6 +50,7 @@ async def view_screenshots():
     html += "</body></html>"
     return html
 
+
 async def screenshot(page, name: str):
     try:
         data = await page.screenshot(type="png", full_page=True)
@@ -52,6 +58,7 @@ async def screenshot(page, name: str):
         logger.info(f"📸 Screenshot: {name}")
     except Exception as e:
         logger.warning(f"Screenshot failed ({name}): {e}")
+
 
 @app.post("/book")
 async def book_appointment(request: Request, booking: BookingRequest):
@@ -64,9 +71,9 @@ async def book_appointment(request: Request, booking: BookingRequest):
 
 
 async def run_wegest_booking(request: BookingRequest) -> dict:
-    WEGEST_USER     = os.environ.get("WEGEST_USERNAME", "")
+    WEGEST_USER = os.environ.get("WEGEST_USERNAME", "")
     WEGEST_PASSWORD = os.environ.get("WEGEST_PASSWORD", "")
-    LOGIN_URL       = "https://www.i-salon.eu/login/default.asp?login=&"
+    LOGIN_URL = "https://www.i-salon.eu/login/default.asp?login=&"
 
     logger.info(f"🔑 Username: '{WEGEST_USER}' | Password length: {len(WEGEST_PASSWORD)}")
 
@@ -102,37 +109,29 @@ async def run_wegest_booking(request: BookingRequest) -> dict:
             logger.info("Login button clicked — waiting for dashboard to load...")
 
             # ── KEY FIX: Wait much longer for AJAX login ──────
-            # Wegest does AJAX login which takes several seconds
-            # We wait for the login panel to disappear OR menu to appear
-            # with a generous 20 second timeout
             try:
                 await page.wait_for_function(
                     """() => {
                         const loginPanel = document.getElementById('pannello_login');
                         const menu = document.getElementById('menu');
                         
-                        // Login successful if:
-                        // 1. Login panel is hidden
                         const loginHidden = loginPanel && 
                             window.getComputedStyle(loginPanel).display === 'none';
                         
-                        // 2. OR menu is visible  
                         const menuVisible = menu && 
                             window.getComputedStyle(menu).display !== 'none';
                         
-                        // 3. OR wrapper_contents has content
                         const contents = document.querySelector('.wrapper_contents');
                         const hasContents = contents && 
                             window.getComputedStyle(contents).display !== 'none';
                         
                         return loginHidden || menuVisible || hasContents;
                     }""",
-                    timeout=60000  # Give it 20 seconds
+                    timeout=60000
                 )
                 logger.info("✅ Dashboard loaded — login successful!")
             except Exception as e:
-                logger.warning(f"DOM wait timeout after 20s: {e}")
-                # Still take screenshot to see current state
+                logger.warning(f"DOM wait timeout: {e}")
                 await screenshot(page, "03_login_timeout")
 
             # Extra buffer for dashboard to fully render
@@ -158,13 +157,47 @@ async def run_wegest_booking(request: BookingRequest) -> dict:
 
             if login_visible and not menu_visible:
                 raise Exception(
-                    f"Login failed after 20s wait. "
+                    f"Login failed after wait. "
                     f"Username='{WEGEST_USER}'. "
                     f"Check /screenshots — screenshot 03 shows current state."
                 )
 
             logger.info("🎉 LOGIN SUCCESS!")
             await screenshot(page, "04_dashboard")
+
+            # ── STEP 3.5: Dismiss "chiusura cassa" modal if present ──
+            logger.info("Step 3.5: Checking for post-login modals (chiusura cassa)...")
+            try:
+                procedi_btn = await page.wait_for_selector(
+                    "button:has-text('OK, PROCEDI'), "
+                    "button:has-text('Ok, procedi'), "
+                    "button:has-text('PROCEDI'), "
+                    ".modale_body button.primary, "
+                    ".modale button.primary",
+                    timeout=8000
+                )
+                if procedi_btn:
+                    await procedi_btn.click()
+                    logger.info("✅ Dismissed 'chiusura cassa' modal — clicked OK, PROCEDI")
+                    await page.wait_for_timeout(3000)
+                    await screenshot(page, "04b_modal_dismissed")
+            except Exception as e:
+                logger.info(f"No 'chiusura cassa' modal found (this is fine): {e}")
+
+            # Sweep for any other visible modals
+            try:
+                close_btns = await page.query_selector_all(
+                    ".modale .chiudi, .modale_close, button:has-text('ANNULLA')"
+                )
+                for btn in close_btns:
+                    if await btn.is_visible():
+                        logger.info("Found another visible modal — closing it...")
+                        await btn.click()
+                        await page.wait_for_timeout(1500)
+            except Exception:
+                pass
+
+            await screenshot(page, "04c_ready_for_agenda")
 
             # ── STEP 4: Click Agenda ──────────────────────────
             logger.info("Step 4: Opening Agenda...")
@@ -177,9 +210,9 @@ async def run_wegest_booking(request: BookingRequest) -> dict:
             # ── STEP 5: Select date ───────────────────────────
             logger.info(f"Step 5: Selecting date {request.preferred_date}...")
             target_date = datetime.strptime(request.preferred_date, "%Y-%m-%d")
-            day   = target_date.day
+            day = target_date.day
             month = target_date.month
-            year  = target_date.year
+            year = target_date.year
 
             date_selector = f".data[giorno='{day}'][mese='{month}'][anno='{year}']"
             await page.wait_for_selector(date_selector, timeout=10000)
@@ -229,14 +262,18 @@ async def run_wegest_booking(request: BookingRequest) -> dict:
                         await new_btn.click()
                         await page.wait_for_timeout(1500)
                         parts = request.customer_name.strip().split(" ", 1)
-                        nome    = await page.query_selector("input[name='Nome']")
+                        nome = await page.query_selector("input[name='Nome']")
                         cognome = await page.query_selector("input[name='Cognome']")
-                        cell    = await page.query_selector("input[name='Cellulare1']")
-                        if nome:    await nome.fill(parts[0])
-                        if cognome and len(parts) > 1: await cognome.fill(parts[1])
-                        if cell:    await cell.fill(request.caller_phone)
+                        cell = await page.query_selector("input[name='Cellulare1']")
+                        if nome:
+                            await nome.fill(parts[0])
+                        if cognome and len(parts) > 1:
+                            await cognome.fill(parts[1])
+                        if cell:
+                            await cell.fill(request.caller_phone)
                         save = await page.query_selector(".pulsanti button.primary")
-                        if save: await save.click()
+                        if save:
+                            await save.click()
                         await page.wait_for_timeout(1500)
                         logger.info("New customer created")
 

@@ -1,8 +1,8 @@
 """
 Agent Andrea - Wegest Direct Booking Service
-Fixed: time slots are div.cella with ora/minuto attributes
+Fixed: exact selectors for customer search, new customer form, time cells
 Fixed: click ANNULLA on chiusura cassa modal
-Fixed: handle "Selezionare una data" warning
+Fixed: handle stacked modals
 """
 
 from fastapi import FastAPI, HTTPException, Request
@@ -63,10 +63,9 @@ async def screenshot(page, name: str):
 
 async def dismiss_all_modals(page, label=""):
     """
-    Dismiss all Wegest modals.
-    - Chiusura cassa modal: click ANNULLA (div.button.avviso)
-    - Warning modals (e.g. "Selezionare una data"): click OK (div.button.conferma)
-    - All Wegest buttons are DIVs, not <button> elements.
+    Dismiss Wegest modals (modale_dialog only).
+    - Chiusura cassa: click ANNULLA (div.button.avviso)
+    - Warnings: click OK/conferma (div.button.conferma)
     """
     logger.info(f"🔍 Modal sweep: {label}")
 
@@ -86,16 +85,15 @@ async def dismiss_all_modals(page, label=""):
 
         logger.info(f"  ⚠️ Modal detected (attempt {attempt + 1})")
 
-        # Read the modal text to decide which button to click
         clicked = await page.evaluate("""
             () => {
                 const modal = document.getElementById('modale_dialog');
                 if (!modal) return null;
-                
+
                 const testo1 = modal.querySelector('.testo1');
                 const modalText = testo1 ? testo1.textContent.toLowerCase() : '';
-                
-                // If it's the "chiusura cassa" modal → click ANNULLA
+
+                // Chiusura cassa modal → click ANNULLA
                 if (modalText.includes('cassa') || modalText.includes('passaggio')) {
                     const annulla = modal.querySelector('.button.avviso');
                     if (annulla && window.getComputedStyle(annulla).display !== 'none') {
@@ -103,29 +101,28 @@ async def dismiss_all_modals(page, label=""):
                         return 'annulla-cassa';
                     }
                 }
-                
-                // For any other modal (warnings like "Selezionare una data") → click conferma/OK
+
+                // Other warnings → click conferma/OK
                 const conferma = modal.querySelector('.button.conferma');
                 if (conferma && window.getComputedStyle(conferma).display !== 'none') {
                     conferma.click();
                     return 'conferma-warning';
                 }
-                
-                // Try chiudi (close)
+
+                // Close button
                 const chiudi = modal.querySelector('.button.chiudi');
                 if (chiudi && window.getComputedStyle(chiudi).display !== 'none') {
                     chiudi.click();
                     return 'chiudi';
                 }
-                
-                // Try annulla as fallback
+
+                // Annulla fallback
                 const annulla = modal.querySelector('.button.avviso');
                 if (annulla && window.getComputedStyle(annulla).display !== 'none') {
                     annulla.click();
                     return 'annulla-fallback';
                 }
-                
-                // Last resort: force hide
+
                 modal.style.display = 'none';
                 return 'force-hidden';
             }
@@ -133,12 +130,9 @@ async def dismiss_all_modals(page, label=""):
 
         if clicked:
             logger.info(f"  ✅ Dismissed via: {clicked}")
-        else:
-            logger.warning(f"  ❌ Could not dismiss modal")
 
         await page.wait_for_timeout(2500)
 
-    # Remove any overlay backgrounds
     await page.evaluate("""
         () => {
             document.querySelectorAll('.modale_overlay, .overlay_modale, .overlay').forEach(el => {
@@ -148,7 +142,6 @@ async def dismiss_all_modals(page, label=""):
             });
         }
     """)
-
     logger.info(f"  Modal sweep complete: {label}")
 
 
@@ -221,7 +214,6 @@ async def run_wegest_booking(request: BookingRequest) -> dict:
             await page.wait_for_timeout(10000)
             await screenshot(page, "03_after_login")
 
-            # Verify login
             login_visible = await page.evaluate("""
                 () => {
                     const el = document.getElementById('pannello_login');
@@ -244,9 +236,7 @@ async def run_wegest_booking(request: BookingRequest) -> dict:
             logger.info("🎉 LOGIN SUCCESS!")
             await screenshot(page, "04_dashboard")
 
-            # ══════════════════════════════════════════════════
-            # STEP 3.5: CLICK ANNULLA ON CHIUSURA CASSA MODAL
-            # ══════════════════════════════════════════════════
+            # ── STEP 3.5: Dismiss chiusura cassa modal ───────
             logger.info("Step 3.5: Dismissing chiusura cassa modal...")
             await dismiss_all_modals(page, "post-login")
             await page.wait_for_timeout(2000)
@@ -257,7 +247,6 @@ async def run_wegest_booking(request: BookingRequest) -> dict:
             await page.wait_for_selector("[pannello='pannello_agenda']", timeout=10000)
             await page.click("[pannello='pannello_agenda']")
             await page.wait_for_timeout(5000)
-
             await dismiss_all_modals(page, "after-agenda")
             await page.wait_for_timeout(2000)
             await screenshot(page, "05_agenda_clean")
@@ -270,30 +259,26 @@ async def run_wegest_booking(request: BookingRequest) -> dict:
             month = target_date.month
             year = target_date.year
 
-            # The calendar strip at top uses div.data with giorno/mese/anno
             date_selector = f".data[giorno='{day}'][mese='{month}'][anno='{year}']"
             logger.info(f"Date selector: {date_selector}")
 
             await dismiss_all_modals(page, "before-date")
 
             date_clicked = False
-
-            # First check if the date is already visible in the calendar strip
             date_exists = await page.evaluate(f"""
                 () => {{
                     const el = document.querySelector(".data[giorno='{day}'][mese='{month}'][anno='{year}']");
                     return !!el;
                 }}
             """)
-            logger.info(f"Date element exists in DOM: {date_exists}")
+            logger.info(f"Date element exists: {date_exists}")
 
             if date_exists:
                 try:
                     await page.click(date_selector, timeout=5000)
                     date_clicked = True
                     logger.info("✅ Date clicked normally")
-                except Exception as e:
-                    logger.warning(f"Normal date click failed: {e}")
+                except:
                     try:
                         await page.click(date_selector, force=True, timeout=5000)
                         date_clicked = True
@@ -302,7 +287,6 @@ async def run_wegest_booking(request: BookingRequest) -> dict:
                         pass
 
             if not date_clicked:
-                # JS fallback
                 clicked_js = await page.evaluate(f"""
                     () => {{
                         const el = document.querySelector(".data[giorno='{day}'][mese='{month}'][anno='{year}']");
@@ -314,28 +298,24 @@ async def run_wegest_booking(request: BookingRequest) -> dict:
                     date_clicked = True
                     logger.info("✅ Date clicked via JS")
                 else:
-                    logger.error(f"❌ Date element not found for {day}/{month}/{year}")
+                    logger.error(f"❌ Date not found: {day}/{month}/{year}")
 
             await page.wait_for_timeout(3000)
             await screenshot(page, "06_date_selected")
-
-            # Dismiss any warning that appeared
             await dismiss_all_modals(page, "after-date")
             await page.wait_for_timeout(1000)
 
-            # Verify the date was actually selected by checking if cells loaded for that date
+            # Verify cells loaded
             cells_loaded = await page.evaluate(f"""
                 () => {{
-                    const cells = document.querySelectorAll(".cella[giorno='{day}'][mese='{month}'][anno='{year}']");
-                    return cells.length;
+                    return document.querySelectorAll(".cella[giorno='{day}'][mese='{month}'][anno='{year}']").length;
                 }}
             """)
             logger.info(f"Cells loaded for {day}/{month}/{year}: {cells_loaded}")
 
             if cells_loaded == 0:
-                logger.warning("No cells found for selected date — date may not have registered")
-                # Try clicking the date one more time
-                await dismiss_all_modals(page, "retry-before-date")
+                logger.warning("No cells — retrying date click")
+                await dismiss_all_modals(page, "retry-date")
                 await page.evaluate(f"""
                     () => {{
                         const el = document.querySelector(".data[giorno='{day}'][mese='{month}'][anno='{year}']");
@@ -343,38 +323,26 @@ async def run_wegest_booking(request: BookingRequest) -> dict:
                     }}
                 """)
                 await page.wait_for_timeout(3000)
-                await dismiss_all_modals(page, "retry-after-date")
-                await page.wait_for_timeout(1000)
+                await dismiss_all_modals(page, "retry-date-after")
                 await screenshot(page, "06b_date_retry")
 
             # ── STEP 6: Click time slot ───────────────────────
-            # Time cells are: div.cella[ora="10"][minuto="0"][giorno="19"][mese="3"][anno="2026"]
             logger.info(f"Step 6: Time slot {request.preferred_time}...")
-
             time_parts = request.preferred_time.split(":")
-            hour = str(int(time_parts[0]))  # Remove leading zero: "09" -> "9"
-            minute = str(int(time_parts[1])) if len(time_parts) > 1 else "0"  # "00" -> "0"
+            hour = str(int(time_parts[0]))
+            minute = str(int(time_parts[1])) if len(time_parts) > 1 else "0"
 
-            logger.info(f"Looking for cell: ora='{hour}' minuto='{minute}' giorno='{day}' mese='{month}' anno='{year}'")
+            logger.info(f"Looking for: .cella[ora='{hour}'][minuto='{minute}'][giorno='{day}'][mese='{month}'][anno='{year}']")
 
-            # Click the first available operator's cell at this time
-            time_clicked = await page.evaluate(f"""
+            time_result = await page.evaluate(f"""
                 () => {{
-                    // Find all cells matching this time on this date
                     const cells = document.querySelectorAll(
                         ".cella[ora='{hour}'][minuto='{minute}'][giorno='{day}'][mese='{month}'][anno='{year}']"
                     );
-                    
-                    console.log('Found ' + cells.length + ' matching cells');
-                    
+
                     for (const cell of cells) {{
-                        // Skip cells that are marked as absent
                         if (cell.classList.contains('assente')) continue;
-                        
-                        // Skip cells that already have an appointment
                         if (cell.classList.contains('occupata')) continue;
-                        
-                        // Click the first available cell
                         cell.click();
                         return {{
                             clicked: true,
@@ -382,182 +350,217 @@ async def run_wegest_booking(request: BookingRequest) -> dict:
                             text: cell.textContent.trim()
                         }};
                     }}
-                    
-                    // If all cells at exact time are unavailable, try any cell at this hour
-                    if (cells.length === 0) {{
-                        const anyCells = document.querySelectorAll(
-                            ".cella[ora='{hour}'][giorno='{day}'][mese='{month}'][anno='{year}']"
-                        );
-                        for (const cell of anyCells) {{
-                            if (cell.classList.contains('assente')) continue;
-                            if (cell.classList.contains('occupata')) continue;
-                            cell.click();
-                            return {{
-                                clicked: true,
-                                operatore: cell.getAttribute('id_operatore'),
-                                text: cell.textContent.trim(),
-                                adjusted_minute: cell.getAttribute('minuto')
-                            }};
-                        }}
+
+                    // Fallback: any cell at this hour
+                    const anyCells = document.querySelectorAll(
+                        ".cella[ora='{hour}'][giorno='{day}'][mese='{month}'][anno='{year}']"
+                    );
+                    for (const cell of anyCells) {{
+                        if (cell.classList.contains('assente')) continue;
+                        if (cell.classList.contains('occupata')) continue;
+                        cell.click();
+                        return {{
+                            clicked: true,
+                            operatore: cell.getAttribute('id_operatore'),
+                            text: cell.textContent.trim(),
+                            adjusted: cell.getAttribute('minuto')
+                        }};
                     }}
-                    
+
                     return {{ clicked: false, total: cells.length }};
                 }}
             """)
 
-            if time_clicked and time_clicked.get('clicked'):
-                logger.info(f"✅ Time slot clicked — operator: {time_clicked.get('operatore')}, text: {time_clicked.get('text')}")
-                if time_clicked.get('adjusted_minute'):
-                    logger.info(f"  (adjusted to minute {time_clicked['adjusted_minute']})")
+            if time_result and time_result.get('clicked'):
+                logger.info(f"✅ Time clicked — operator: {time_result.get('operatore')}")
             else:
-                logger.warning(f"⚠️ Could not click time slot. Result: {time_clicked}")
+                logger.warning(f"⚠️ Could not click time. Result: {time_result}")
 
             await page.wait_for_timeout(3000)
             await screenshot(page, "07_time_slot_clicked")
             await dismiss_all_modals(page, "after-time")
 
-            # ── STEP 7: Customer search ───────────────────────
+            # ── STEP 7: Customer search & selection ───────────
+            # After clicking a time cell, Wegest opens the customer search modal
+            # div.cerca_cliente.modale with input[name='cerca_cliente']
             logger.info(f"Step 7: Customer {request.customer_name}...")
             customer_found = False
+
             try:
-                customer_input = None
-                for sel in [
-                    "input[name='cerca_cliente']",
-                    "input[placeholder*='cliente']",
-                    "input[placeholder*='Cliente']",
-                    "input[placeholder*='cerca']",
-                    "#cerca_cliente",
-                ]:
-                    try:
-                        await page.wait_for_selector(sel, timeout=5000)
-                        customer_input = sel
-                        break
-                    except:
-                        continue
+                # Wait for the customer search modal to appear
+                await page.wait_for_selector(".cerca_cliente.modale input[name='cerca_cliente']", timeout=8000)
+                logger.info("Customer search modal appeared")
 
-                if customer_input:
-                    first_name = request.customer_name.strip().split()[0]
-                    await page.fill(customer_input, first_name)
-                    await page.wait_for_timeout(2000)
-                    await screenshot(page, "08_customer_search")
+                first_name = request.customer_name.strip().split()[0]
+                await page.fill(".cerca_cliente.modale input[name='cerca_cliente']", first_name)
+                logger.info(f"Typed '{first_name}' in search")
 
-                    # Wegest uses div.button.rimira for results too
-                    results = await page.query_selector_all(
-                        ".modale_body button.rimira, .modale_body div.button.rimira, "
-                        ".risultati_ricerca button, .risultati_ricerca div.button, "
-                        ".lista_clienti button, .lista_clienti div.button, "
-                        ".cliente_risultato"
-                    )
-                    for r in results:
-                        text = (await r.inner_text()).lower()
-                        if first_name.lower() in text:
-                            await r.click()
-                            customer_found = True
-                            logger.info(f"✅ Customer found: {text.strip()}")
-                            break
+                # Wait for search results to load
+                await page.wait_for_timeout(2000)
+                await screenshot(page, "08_customer_search")
 
-                    if not customer_found:
-                        logger.info("Customer not found — creating new...")
-                        # Try clicking "Nuovo cliente" button
-                        new_clicked = await page.evaluate("""
-                            () => {
-                                const buttons = document.querySelectorAll('div.button, button');
-                                for (const btn of buttons) {
-                                    const text = btn.textContent.toLowerCase().trim();
-                                    const style = window.getComputedStyle(btn);
-                                    if (style.display === 'none') continue;
-                                    if (text.includes('nuovo') || text.includes('crea') || text.includes('aggiungi cliente')) {
-                                        btn.click();
-                                        return true;
-                                    }
-                                }
-                                return false;
-                            }
-                        """)
+                # Check for results in the modale_body
+                # Results appear as clickable elements in .modale_body
+                results = await page.evaluate(f"""
+                    () => {{
+                        const body = document.querySelector('.cerca_cliente .modale_body');
+                        if (!body) return {{ found: false, count: 0 }};
 
-                        if new_clicked:
-                            await page.wait_for_timeout(2000)
-                            parts = request.customer_name.strip().split(" ", 1)
-                            nome = await page.query_selector("input[name='Nome']")
-                            cognome = await page.query_selector("input[name='Cognome']")
-                            cell = await page.query_selector("input[name='Cellulare1']")
-                            if nome:
-                                await nome.fill(parts[0])
-                            if cognome and len(parts) > 1:
-                                await cognome.fill(parts[1])
-                            if cell:
-                                await cell.fill(request.caller_phone)
+                        const items = body.querySelectorAll('div[id_cliente], .cliente, .risultato, .riga');
+                        const searchName = '{first_name.lower()}';
 
-                            # Save new customer
-                            await page.evaluate("""
-                                () => {
-                                    const buttons = document.querySelectorAll('div.button, button');
-                                    for (const btn of buttons) {
-                                        const text = btn.textContent.toLowerCase().trim();
-                                        const style = window.getComputedStyle(btn);
-                                        if (style.display === 'none') continue;
-                                        if (text.includes('salva') || text.includes('conferma')) {
-                                            btn.click();
-                                            return;
-                                        }
-                                    }
-                                }
-                            """)
-                            await page.wait_for_timeout(2000)
-                            customer_found = True
-                            logger.info("✅ New customer created")
+                        for (const item of items) {{
+                            const text = item.textContent.toLowerCase();
+                            if (text.includes(searchName)) {{
+                                item.click();
+                                return {{ found: true, text: text.trim().substring(0, 50) }};
+                            }}
+                        }}
+
+                        // Also try any clickable element in results
+                        const allClickable = body.querySelectorAll('div, span, a');
+                        for (const el of allClickable) {{
+                            const text = el.textContent.toLowerCase();
+                            if (text.includes(searchName) && el.offsetHeight > 0) {{
+                                el.click();
+                                return {{ found: true, text: text.trim().substring(0, 50) }};
+                            }}
+                        }}
+
+                        return {{ found: false, count: items.length }};
+                    }}
+                """)
+
+                if results and results.get('found'):
+                    customer_found = True
+                    logger.info(f"✅ Customer found and selected: {results.get('text', '')}")
                 else:
-                    logger.warning("Could not find customer search input")
+                    logger.info(f"Customer not found in results (count: {results.get('count', 0)}) — creating new...")
+
+                    # Click "Nuovo Cliente" button in the search modal
+                    # It's: div.button.rimira.primary.aggiungi inside .cerca_cliente
+                    await page.evaluate("""
+                        () => {
+                            const modal = document.querySelector('.cerca_cliente.modale');
+                            if (!modal) return;
+                            const btn = modal.querySelector('.button.primary.aggiungi');
+                            if (btn) btn.click();
+                        }
+                    """)
+                    logger.info("Clicked 'Nuovo Cliente'")
+                    await page.wait_for_timeout(2000)
+                    await screenshot(page, "08b_new_customer_form")
+
+                    # Now the new customer form (div.form_cliente) should be visible
+                    # Fill: nome, cognome, cellulare
+                    parts = request.customer_name.strip().split(" ", 1)
+                    nome = parts[0]
+                    cognome = parts[1] if len(parts) > 1 else ""
+
+                    # Strip country prefix from phone for the cellulare field
+                    phone = request.caller_phone
+                    if phone.startswith("+39"):
+                        phone = phone[3:]
+                    elif phone.startswith("0039"):
+                        phone = phone[4:]
+
+                    await page.evaluate(f"""
+                        () => {{
+                            const form = document.querySelector('.form_cliente');
+                            if (!form) return;
+
+                            const nomeInput = form.querySelector("input[name='nome']");
+                            const cognomeInput = form.querySelector("input[name='cognome']");
+                            const cellInput = form.querySelector("input[name='cellulare']");
+
+                            if (nomeInput) {{
+                                nomeInput.value = '{nome}';
+                                nomeInput.dispatchEvent(new Event('input', {{ bubbles: true }}));
+                                nomeInput.dispatchEvent(new Event('change', {{ bubbles: true }}));
+                            }}
+                            if (cognomeInput) {{
+                                cognomeInput.value = '{cognome}';
+                                cognomeInput.dispatchEvent(new Event('input', {{ bubbles: true }}));
+                                cognomeInput.dispatchEvent(new Event('change', {{ bubbles: true }}));
+                            }}
+                            if (cellInput) {{
+                                cellInput.value = '{phone}';
+                                cellInput.dispatchEvent(new Event('input', {{ bubbles: true }}));
+                                cellInput.dispatchEvent(new Event('change', {{ bubbles: true }}));
+                            }}
+                        }}
+                    """)
+                    logger.info(f"Filled form: nome={nome}, cognome={cognome}, cell={phone}")
+                    await page.wait_for_timeout(1000)
+                    await screenshot(page, "08c_form_filled")
+
+                    # Click "Aggiungi cliente" in the form footer
+                    # It's: .form_cliente .modale_footer div.button.rimira.primary.aggiungi
+                    await page.evaluate("""
+                        () => {
+                            const form = document.querySelector('.form_cliente');
+                            if (!form) return;
+                            const footer = form.querySelector('.modale_footer');
+                            if (!footer) return;
+                            const addBtn = footer.querySelector('.button.primary.aggiungi');
+                            if (addBtn) addBtn.click();
+                        }
+                    """)
+                    logger.info("Clicked 'Aggiungi cliente'")
+                    customer_found = True
+                    await page.wait_for_timeout(3000)
+                    await screenshot(page, "08d_customer_added")
 
             except Exception as e:
                 logger.warning(f"Customer step issue: {e}")
+                await screenshot(page, "08_error")
 
             await screenshot(page, "09_customer_done")
             await page.wait_for_timeout(1000)
+
+            # After selecting/creating customer, Wegest should show the appointment form
+            # with service selection, operator selection, etc.
+            await screenshot(page, "09b_appointment_form")
 
             # ── STEP 8: Select service ────────────────────────
             logger.info(f"Step 8: Service: {request.service}...")
             keywords = request.service.lower().split()
             service_selected = False
 
-            # Try all possible service button selectors
-            els = await page.query_selector_all(
-                ".pulsanti_tab .servizi button, .servizi button, button.servizio, "
-                ".lista_servizi button, div.button.servizio, .servizi div.button"
-            )
-            logger.info(f"Found {len(els)} service buttons")
-            for el in els:
-                try:
-                    text = (await el.inner_text()).lower()
-                    if any(k in text for k in keywords):
-                        await el.click()
-                        service_selected = True
-                        logger.info(f"✅ Service selected: {text.strip()}")
-                        break
-                except:
-                    continue
+            # Look for service buttons/elements
+            service_selected = await page.evaluate(f"""
+                () => {{
+                    const keywords = {list(keywords)};
 
-            if not service_selected:
-                logger.warning("Service not found via selectors — trying JS...")
-                service_kw = request.service.lower()
-                service_selected = await page.evaluate(f"""
-                    () => {{
-                        const els = document.querySelectorAll('button, div.button, div.servizio, span, div');
+                    // Try buttons with service-related classes
+                    const selectors = [
+                        '.servizi button', '.servizi div.button', 'button.servizio',
+                        'div.button.servizio', '.lista_servizi button', '.lista_servizi div',
+                        '.pulsanti_tab .servizi button', '.pulsanti_tab .servizi div.button'
+                    ];
+
+                    for (const selector of selectors) {{
+                        const els = document.querySelectorAll(selector);
                         for (const el of els) {{
                             const text = el.textContent.toLowerCase().trim();
                             const style = window.getComputedStyle(el);
                             if (style.display === 'none' || style.visibility === 'hidden') continue;
-                            if (text === '{service_kw}' || text.includes('{service_kw}')) {{
-                                // Make sure it's a clickable element, not a container
-                                if (el.classList.contains('button') || el.classList.contains('servizio') || el.tagName === 'BUTTON') {{
+                            for (const kw of keywords) {{
+                                if (text.includes(kw)) {{
                                     el.click();
                                     return true;
                                 }}
                             }}
                         }}
-                        return false;
                     }}
-                """)
+                    return false;
+                }}
+            """)
+
+            if service_selected:
+                logger.info("✅ Service selected")
+            else:
+                logger.warning("⚠️ Could not find service button")
 
             await page.wait_for_timeout(1000)
             await screenshot(page, "10_service_selected")
@@ -568,11 +571,11 @@ async def run_wegest_booking(request: BookingRequest) -> dict:
                 op_name = request.operator_preference.lower()
                 await page.evaluate(f"""
                     () => {{
-                        const els = document.querySelectorAll('button, div.button, div.operatore');
+                        const els = document.querySelectorAll(
+                            '.operatori button, .operatori div.button, button.operatore, div.operatore'
+                        );
                         for (const el of els) {{
                             const text = el.textContent.toLowerCase().trim();
-                            const style = window.getComputedStyle(el);
-                            if (style.display === 'none') continue;
                             if (text.includes('{op_name}')) {{
                                 el.click();
                                 return;
@@ -582,49 +585,57 @@ async def run_wegest_booking(request: BookingRequest) -> dict:
                 """)
             await page.wait_for_timeout(1000)
 
-            # ── STEP 10: Add appointment ──────────────────────
+            # ── STEP 10: Add/confirm appointment ─────────────
             logger.info("Step 10: Adding appointment...")
-            added = False
-
-            # Use JS to find and click the add/save button
             added = await page.evaluate("""
                 () => {
+                    // Look for add/save/confirm buttons
+                    const selectors = [
+                        '.form_appuntamento .button.aggiungi',
+                        '.form_appuntamento .button.primary',
+                        '.form_appuntamento .button.conferma',
+                    ];
+                    for (const sel of selectors) {
+                        const el = document.querySelector(sel);
+                        if (el && window.getComputedStyle(el).display !== 'none') {
+                            el.click();
+                            return 'form_appuntamento';
+                        }
+                    }
+
+                    // Broader search
                     const els = document.querySelectorAll('button, div.button');
                     for (const el of els) {
                         const text = el.textContent.toLowerCase().trim();
                         const style = window.getComputedStyle(el);
                         if (style.display === 'none' || style.visibility === 'hidden') continue;
-                        if (text.includes('aggiungi') || text.includes('salva appuntamento')) {
+                        if (text.includes('aggiungi appuntamento') || text.includes('salva appuntamento')) {
                             el.click();
-                            return true;
+                            return 'text-match: ' + text;
                         }
                     }
-                    return false;
+
+                    // Even broader
+                    for (const el of els) {
+                        const text = el.textContent.toLowerCase().trim();
+                        const style = window.getComputedStyle(el);
+                        if (style.display === 'none' || style.visibility === 'hidden') continue;
+                        // Avoid clicking navigation buttons
+                        if (el.closest('#menu') || el.closest('.cerca_cliente')) continue;
+                        if (text === 'aggiungi' || text.includes('conferma')) {
+                            el.click();
+                            return 'broad-match: ' + text;
+                        }
+                    }
+
+                    return null;
                 }
             """)
 
             if added:
-                logger.info("✅ Add/Save button clicked")
+                logger.info(f"✅ Appointment button clicked: {added}")
             else:
-                logger.warning("⚠️ Could not find add/save button")
-                # Try Playwright selectors as fallback
-                for sel in [
-                    "button.aggiungi",
-                    "div.button.aggiungi",
-                    "button:has-text('Aggiungi')",
-                    "div.button:has-text('Aggiungi')",
-                    "button:has-text('Salva')",
-                    "div.button:has-text('Salva')",
-                ]:
-                    try:
-                        btn = page.locator(sel).first
-                        if await btn.is_visible(timeout=2000):
-                            await btn.click()
-                            added = True
-                            logger.info(f"✅ Added via fallback: {sel}")
-                            break
-                    except:
-                        continue
+                logger.warning("⚠️ Could not find appointment add button")
 
             await page.wait_for_timeout(3000)
             await screenshot(page, "11_final_result")
@@ -653,9 +664,9 @@ async def run_wegest_booking(request: BookingRequest) -> dict:
                 }
             """)
 
-            logger.info(f"Verify — agenda: {on_agenda} | customer: {has_customer_on_page} | error_modal: {has_error_modal} | added: {added}")
+            logger.info(f"Verify — agenda: {on_agenda} | customer: {has_customer_on_page} | error: {has_error_modal} | added: {added}")
 
-            success = on_agenda and not has_error_modal and (has_customer_on_page or added)
+            success = on_agenda and not has_error_modal and (has_customer_on_page or bool(added))
 
             await browser.close()
             logger.info(f"🏁 {'✅ SUCCESS' if success else '⚠️ UNCERTAIN'}")

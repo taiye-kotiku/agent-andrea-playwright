@@ -472,25 +472,51 @@ async def run_wegest_booking(request: BookingRequest) -> dict:
 
                     # Click "Add customer" in modale_footer
                     # NOT .azioni (that's "Add appointment")
-                    saved = await page.evaluate("""
-                        () => {
-                            const btn = document.querySelector(
-                                '.modale_footer .button.rimira.primary.aggiungi'
-                            );
-                            if (btn && btn.offsetParent !== null) {
-                                btn.click();
-                                return { clicked: true, text: btn.textContent.trim().substring(0, 30) };
-                            }
-                            return { clicked: false };
-                        }
-                    """)
-                    logger.info(f"  Save: {saved}")
-
-                    if saved and saved.get('clicked'):
+                    # Click "Add customer" in modale_footer
+                    # Use Playwright click — more reliable than JS evaluate
+                    try:
+                        await page.click(
+                            ".modale_footer .button.rimira.primary.aggiungi",
+                            timeout=5000
+                        )
                         customer_found = True
-                        logger.info("✅ New customer created")
-                    else:
-                        logger.warning("⚠️ Save button not found")
+                        logger.info("✅ New customer created (playwright click)")
+                    except Exception as click_err:
+                        logger.warning(f"Playwright click failed: {click_err}")
+                        # JS fallback with better visibility check
+                        saved = await page.evaluate("""
+                            () => {
+                                const btns = document.querySelectorAll(
+                                    '.modale_footer .button.rimira.primary.aggiungi'
+                                );
+                                for (const btn of btns) {
+                                    const s = getComputedStyle(btn);
+                                    if (s.display === 'none' || s.visibility === 'hidden')
+                                        continue;
+                                    if (s.pointerEvents === 'none') continue;
+                                    btn.click();
+                                    return true;
+                                }
+                                // Broader: any visible primary aggiungi NOT in .azioni
+                                const all = document.querySelectorAll(
+                                    '.button.rimira.primary.aggiungi'
+                                );
+                                for (const btn of all) {
+                                    if (btn.closest('.azioni')) continue;
+                                    if (btn.closest('.cerca_cliente')) continue;
+                                    const s = getComputedStyle(btn);
+                                    if (s.display === 'none') continue;
+                                    btn.click();
+                                    return true;
+                                }
+                                return false;
+                            }
+                        """)
+                        if saved:
+                            customer_found = True
+                            logger.info("✅ New customer created (JS fallback)")
+                        else:
+                            logger.warning("⚠️ Could not click Add customer!")
 
                     await page.wait_for_timeout(4000)
                     await snap(page, "07g_saved")
@@ -505,21 +531,55 @@ async def run_wegest_booking(request: BookingRequest) -> dict:
             # ═══════════════════════════════════════════
             # STEP 7.5: Phone number modal
             # ═══════════════════════════════════════════
-            phone_modal = await page.evaluate("""
-                () => {
-                    const m = document.querySelector('.modale.card.inserisci_cellulare');
-                    return m ? getComputedStyle(m).display !== 'none' : false;
-                }
-            """)
-            if phone_modal:
-                logger.info("📱 Phone modal — filling...")
-                await page.fill(".inserisci_cellulare input[name='cellulare']", search_phone)
-                await page.wait_for_timeout(500)
-                await page.click(".inserisci_cellulare .button.rimira.primary.conferma")
-                logger.info(f"✅ Phone: {search_phone}")
-                await page.wait_for_timeout(2000)
+                    # Click "Add customer" in modale_footer
+                    # Use Playwright click — more reliable than JS evaluate
+            try:
+                await page.click(
+                    ".modale_footer .button.rimira.primary.aggiungi",
+                    timeout=5000
+                        )
+                customer_found = True
+                logger.info("✅ New customer created (playwright click)")
+            except Exception as click_err:
+                logger.warning(f"Playwright click failed: {click_err}")
+                        # JS fallback with better visibility check
+                saved = await page.evaluate("""
+                            () => {
+                                const btns = document.querySelectorAll(
+                                    '.modale_footer .button.rimira.primary.aggiungi'
+                                );
+                                for (const btn of btns) {
+                                    const s = getComputedStyle(btn);
+                                    if (s.display === 'none' || s.visibility === 'hidden')
+                                        continue;
+                                    if (s.pointerEvents === 'none') continue;
+                                    btn.click();
+                                    return true;
+                                }
+                                // Broader: any visible primary aggiungi NOT in .azioni
+                                const all = document.querySelectorAll(
+                                    '.button.rimira.primary.aggiungi'
+                                );
+                                for (const btn of all) {
+                                    if (btn.closest('.azioni')) continue;
+                                    if (btn.closest('.cerca_cliente')) continue;
+                                    const s = getComputedStyle(btn);
+                                    if (s.display === 'none') continue;
+                                    btn.click();
+                                    return true;
+                                }
+                                return false;
+                            }
+                        """)
+                if saved:
+                    customer_found = True
+                    logger.info("✅ New customer created (JS fallback)")
+                else:
+                    logger.warning("⚠️ Could not click Add customer!")
 
-            await snap(page, "08_form_ready")
+            await page.wait_for_timeout(4000)
+            await snap(page, "07g_saved")
+            await dismiss_system_modals(page, "after-new-customer")
 
             # ═══════════════════════════════════════════
             # STEP 8: Select service

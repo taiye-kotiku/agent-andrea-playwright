@@ -84,8 +84,8 @@ async def run_wegest_booking(request: BookingRequest) -> dict:
         try:
             # ── STEP 1: Load login page ───────────────────────
             logger.info("Step 1: Loading login page...")
-            await page.goto(LOGIN_URL, wait_until="networkidle", timeout=30000)
-            await page.wait_for_timeout(2000)
+            await page.goto(LOGIN_URL, wait_until="networkidle", timeout=60000)
+            await page.wait_for_timeout(5000)
             await screenshot(page, "01_login_page")
 
             # ── STEP 2: Fill credentials ──────────────────────
@@ -127,7 +127,7 @@ async def run_wegest_booking(request: BookingRequest) -> dict:
                         
                         return loginHidden || menuVisible || hasContents;
                     }""",
-                    timeout=20000  # Give it 20 seconds
+                    timeout=60000  # Give it 20 seconds
                 )
                 logger.info("✅ Dashboard loaded — login successful!")
             except Exception as e:
@@ -136,7 +136,7 @@ async def run_wegest_booking(request: BookingRequest) -> dict:
                 await screenshot(page, "03_login_timeout")
 
             # Extra buffer for dashboard to fully render
-            await page.wait_for_timeout(3000)
+            await page.wait_for_timeout(10000)
             await screenshot(page, "03_after_login")
 
             # Verify login state

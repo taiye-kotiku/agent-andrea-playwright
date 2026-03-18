@@ -319,118 +319,249 @@ async def run_wegest_booking(request: BookingRequest) -> dict:
 
             # ═══════════════════════════════════════════
             # STEP 7: Customer search & selection
-            # Verified: .cerca_cliente.modale opens
-            # Search: input[name='cerca_cliente']
-            # Results: .tabella_clienti tbody tr[id] → p.cliente
-            # New: .cerca_cliente .pulsanti .button.rimira.primary.aggiungi
+            # Verified selectors:
+            #   Search modal: .cerca_cliente.modale
+            #   Search input: input[name='cerca_cliente']
+            #   Results: .tabella_clienti tbody tr[id] → p.cliente
+            #   New customer btn: .cerca_cliente .pulsanti .button.rimira.primary.aggiungi
+            #   New form fields: input[name='nome'], input[name='cognome'], input[name='cellulare']
+            #   New form save: .modale_footer .button.rimira.primary.aggiungi
             # ═══════════════════════════════════════════
             logger.info(f"Step 7: Customer '{request.customer_name}'...")
             customer_found = False
 
+            name_parts = request.customer_name.strip().split()
+            first_name = name_parts[0] if name_parts else ""
+            last_name = name_parts[-1] if len(name_parts) > 1 else ""
+            first_safe = js_escape(first_name.lower())
+            last_safe = js_escape(last_name.lower())
+
+            search_phone = request.caller_phone
+            if search_phone.startswith("+39"):
+                search_phone = search_phone[3:]
+            elif search_phone.startswith("0039"):
+                search_phone = search_phone[4:]
+            phone_safe = js_escape(search_phone)
+
             try:
-                await page.wait_for_selector(".cerca_cliente.modale input[name='cerca_cliente']", timeout=10000)
+                await page.wait_for_selector(
+                    ".cerca_cliente.modale input[name='cerca_cliente']",
+                    timeout=10000
+                )
                 logger.info("✅ Customer search modal open")
 
-                first_name = request.customer_name.strip().split()[0]
-                first_safe = js_escape(first_name)
-                full_safe = js_escape(request.customer_name)
-
-                # Type into search
-                await page.fill(".cerca_cliente.modale input[name='cerca_cliente']", first_name)
-                await page.wait_for_timeout(3000)
-                await snap(page, "07_customer_search")
-
-                # Check for results in the table
-                results = await page.evaluate(f"""
+                # Reusable match logic: requires BOTH first AND last name
+                match_js = f"""
                     () => {{
-                        const kw = '{first_safe}'.toLowerCase();
-                        const full = '{full_safe}'.toLowerCase();
-                        const rows = document.querySelectorAll('.tabella_clienti tbody tr[id]');
-
-                        // Full name match
+                        const first = '{first_safe}';
+                        const last = '{last_safe}';
+                        const rows = document.querySelectorAll(
+                            '.tabella_clienti tbody tr[id]'
+                        );
+                        const results = [];
                         for (const row of rows) {{
                             const p = row.querySelector('p.cliente');
-                            if (p && p.textContent.toLowerCase().includes(full)) {{
-                                row.click();
-                                return {{ found: true, id: row.id, name: p.textContent.trim(), m: 'full' }};
-                            }}
+                            if (!p) continue;
+                            const text = p.textContent.toLowerCase().trim();
+                            results.push({{
+                                id: row.id,
+                                name: p.textContent.trim(),
+                                hasFirst: text.includes(first),
+                                hasLast: last ? text.includes(last) : false
+                            }});
                         }}
-                        // First name match
-                        for (const row of rows) {{
-                            const p = row.querySelector('p.cliente');
-                            if (p && p.textContent.toLowerCase().includes(kw)) {{
-                                row.click();
-                                return {{ found: true, id: row.id, name: p.textContent.trim(), m: 'first' }};
-                            }}
-                        }}
-                        // Single result
-                        if (rows.length === 1) {{
-                            rows[0].click();
-                            const p = rows[0].querySelector('p.cliente');
-                            return {{ found: true, id: rows[0].id, name: p ? p.textContent.trim() : '?', m: 'only' }};
-                        }}
-                        return {{ found: false, count: rows.length }};
-                    }}
-                """)
-
-                if results and results.get('found'):
-                    customer_found = True
-                    logger.info(f"✅ Customer: {results}")
-                else:
-                    logger.info(f"Customer not in DB ({results}). Creating...")
-                    await page.click(".cerca_cliente .pulsanti .button.rimira.primary.aggiungi")
-                    await page.wait_for_timeout(2000)
-                    await snap(page, "07b_new_form")
-
-                    parts = request.customer_name.strip().split(" ", 1)
-                    nome = js_escape(parts[0])
-                    cognome = js_escape(parts[1]) if len(parts) > 1 else ""
-                    phone = request.caller_phone
-                    if phone.startswith("+39"):
-                        phone = phone[3:]
-                    elif phone.startswith("0039"):
-                        phone = phone[4:]
-                    phone_safe = js_escape(phone)
-
-                    await page.evaluate(f"""
-                        () => {{
-                            const set = (n, v) => {{
-                                const inputs = document.querySelectorAll('input[name="' + n + '"]');
-                                for (const i of inputs) {{
-                                    if (getComputedStyle(i).display === 'none') continue;
-                                    if (i.closest('.cerca_cliente') && i.name === 'cerca_cliente') continue;
-                                    i.value = v;
-                                    i.dispatchEvent(new Event('input', {{bubbles:true}}));
-                                    i.dispatchEvent(new Event('change', {{bubbles:true}}));
-                                    return;
+                        // Must match BOTH names if last name given
+                        if (last) {{
+                            for (const r of results) {{
+                                if (r.hasFirst && r.hasLast) {{
+                                    document.getElementById(r.id).click();
+                                    return {{ found: true, ...r, method: 'both_names' }};
                                 }}
-                            }};
-                            set('nome', '{nome}');
-                            set('cognome', '{cognome}');
-                            set('cellulare', '{phone_safe}');
+                            }}
                         }}
-                    """)
-                    await snap(page, "07c_filled")
+                        // Only first name provided
+                        if (!last) {{
+                            for (const r of results) {{
+                                if (r.hasFirst) {{
+                                    document.getElementById(r.id).click();
+                                    return {{ found: true, ...r, method: 'first_only' }};
+                                }}
+                            }}
+                        }}
+                        return {{
+                            found: false,
+                            count: results.length,
+                            candidates: results.map(r => r.name).slice(0, 5)
+                        }};
+                    }}
+                """
 
-                    # Click save (avoid clicking the appointment .azioni button)
-                    await page.evaluate("""
+                # ── Search 1: Full name ────────────────────────
+                logger.info(f"  Search 1: '{request.customer_name}'")
+                await page.fill(
+                    ".cerca_cliente.modale input[name='cerca_cliente']",
+                    request.customer_name
+                )
+                await page.wait_for_timeout(3000)
+                await snap(page, "07a_search_full")
+                match = await page.evaluate(match_js)
+                if match and match.get('found'):
+                    customer_found = True
+                    logger.info(f"✅ Match: {match}")
+
+                # ── Search 2: First name ───────────────────────
+                if not customer_found:
+                    logger.info(f"  Search 2: '{first_name}'")
+                    await page.fill(
+                        ".cerca_cliente.modale input[name='cerca_cliente']",
+                        first_name
+                    )
+                    await page.wait_for_timeout(3000)
+                    await snap(page, "07b_search_first")
+                    match = await page.evaluate(match_js)
+                    if match and match.get('found'):
+                        customer_found = True
+                        logger.info(f"✅ Match: {match}")
+
+                # ── Search 3: Last name ────────────────────────
+                if not customer_found and last_name:
+                    logger.info(f"  Search 3: '{last_name}'")
+                    await page.fill(
+                        ".cerca_cliente.modale input[name='cerca_cliente']",
+                        last_name
+                    )
+                    await page.wait_for_timeout(3000)
+                    await snap(page, "07c_search_last")
+                    match = await page.evaluate(match_js)
+                    if match and match.get('found'):
+                        customer_found = True
+                        logger.info(f"✅ Match: {match}")
+
+                # ── Search 4: Phone ────────────────────────────
+                if not customer_found and search_phone:
+                    logger.info(f"  Search 4: phone '{search_phone}'")
+                    await page.fill(
+                        ".cerca_cliente.modale input[name='cerca_cliente']",
+                        search_phone
+                    )
+                    await page.wait_for_timeout(3000)
+                    await snap(page, "07d_search_phone")
+                    match = await page.evaluate("""
                         () => {
-                            const btns = document.querySelectorAll('.button.rimira.primary');
-                            for (const b of btns) {
-                                if (getComputedStyle(b).display === 'none') continue;
-                                if (b.closest('.azioni')) continue;
-                                const t = b.textContent.toLowerCase();
-                                if (t.includes('salva') || t.includes('conferma') || t.includes('aggiungi')) {
-                                    b.click();
-                                    return true;
-                                }
+                            const rows = document.querySelectorAll(
+                                '.tabella_clienti tbody tr[id]'
+                            );
+                            if (rows.length === 1) {
+                                rows[0].click();
+                                const p = rows[0].querySelector('p.cliente');
+                                return {
+                                    found: true,
+                                    id: rows[0].id,
+                                    name: p ? p.textContent.trim() : '?',
+                                    method: 'phone_unique'
+                                };
                             }
-                            return false;
+                            return { found: false, count: rows.length };
                         }
                     """)
-                    customer_found = True
+                    if match and match.get('found'):
+                        customer_found = True
+                        logger.info(f"✅ Phone match: {match}")
+
+                # ── CREATE NEW CUSTOMER ────────────────────────
+                if not customer_found:
+                    logger.info("  ❌ Not found → creating new customer")
+                    await page.fill(
+                        ".cerca_cliente.modale input[name='cerca_cliente']", ""
+                    )
+                    await page.wait_for_timeout(500)
+
+                    # Click "New Customer" button in search modal footer
+                    await page.click(
+                        ".cerca_cliente .pulsanti .button.rimira.primary.aggiungi"
+                    )
                     await page.wait_for_timeout(3000)
-                    await snap(page, "07d_created")
+                    await snap(page, "07e_new_form")
+
+                    # Fill Nome (visible input[name='nome'])
+                    nome_ok = await page.evaluate(f"""
+                        () => {{
+                            const inputs = document.querySelectorAll('input[name="nome"]');
+                            for (const inp of inputs) {{
+                                if (inp.offsetParent === null) continue;
+                                inp.value = '{js_escape(first_name)}';
+                                inp.dispatchEvent(new Event('input', {{bubbles:true}}));
+                                inp.dispatchEvent(new Event('change', {{bubbles:true}}));
+                                return true;
+                            }}
+                            return false;
+                        }}
+                    """)
+
+                    # Fill Cognome (visible input[name='cognome'])
+                    cognome_ok = await page.evaluate(f"""
+                        () => {{
+                            const inputs = document.querySelectorAll('input[name="cognome"]');
+                            for (const inp of inputs) {{
+                                if (inp.offsetParent === null) continue;
+                                inp.value = '{js_escape(last_name)}';
+                                inp.dispatchEvent(new Event('input', {{bubbles:true}}));
+                                inp.dispatchEvent(new Event('change', {{bubbles:true}}));
+                                return true;
+                            }}
+                            return false;
+                        }}
+                    """)
+
+                    # Fill Cellulare (skip .inserisci_cellulare)
+                    cell_ok = await page.evaluate(f"""
+                        () => {{
+                            const inputs = document.querySelectorAll('input[name="cellulare"]');
+                            for (const inp of inputs) {{
+                                if (inp.offsetParent === null) continue;
+                                if (inp.closest('.inserisci_cellulare')) continue;
+                                inp.value = '{phone_safe}';
+                                inp.dispatchEvent(new Event('input', {{bubbles:true}}));
+                                inp.dispatchEvent(new Event('change', {{bubbles:true}}));
+                                return true;
+                            }}
+                            return false;
+                        }}
+                    """)
+
+                    logger.info(f"  Filled: nome={nome_ok} cognome={cognome_ok} cell={cell_ok}")
+                    await snap(page, "07f_filled")
+
+                    # Click "Add customer" — .modale_footer .button.rimira.primary.aggiungi
+                    # NOT .azioni (that's "Add appointment")
+                    saved = await page.evaluate("""
+                        () => {
+                            const btn = document.querySelector(
+                                '.modale_footer .button.rimira.primary.aggiungi'
+                            );
+                            if (btn && btn.offsetParent !== null) {
+                                btn.click();
+                                return {
+                                    clicked: true,
+                                    text: btn.textContent.trim().substring(0, 30),
+                                    method: 'modale_footer'
+                                };
+                            }
+                            return { clicked: false };
+                        }
+                    """)
+
+                    logger.info(f"  Save: {saved}")
+
+                    if saved and saved.get('clicked'):
+                        customer_found = True
+                        logger.info("✅ New customer created")
+                    else:
+                        logger.warning("⚠️ Save button not found!")
+
+                    await page.wait_for_timeout(4000)
+                    await snap(page, "07g_saved")
+                    await dismiss_system_modals(page, "after-new-customer")
 
             except Exception as e:
                 logger.warning(f"Customer error: {e}")
@@ -438,6 +569,7 @@ async def run_wegest_booking(request: BookingRequest) -> dict:
 
             await page.wait_for_timeout(2000)
 
+            
             # ═══════════════════════════════════════════
             # STEP 7.5: Phone number modal
             # Verified: .modale.card.inserisci_cellulare

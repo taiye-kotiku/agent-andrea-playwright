@@ -1,19 +1,24 @@
 """
 Agent Andrea - Wegest Direct Booking Service
-Login uses AJAX - we intercept the response to detect success
+With screenshot debugging endpoint
 """
 
 from fastapi import FastAPI, HTTPException, Request
+from fastapi.responses import HTMLResponse
 from pydantic import BaseModel
 from playwright.async_api import async_playwright
 from datetime import datetime
 import os
+import base64
 import logging
 
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
 app = FastAPI(title="Agent Andrea - Wegest Booking Service")
+
+# Store screenshots in memory for debugging
+screenshots = {}
 
 class BookingRequest(BaseModel):
     customer_name: str
@@ -29,12 +34,39 @@ API_SECRET = os.environ.get("API_SECRET", "changeme")
 async def health():
     return {"status": "ok", "service": "Agent Andrea Wegest Booking"}
 
+@app.get("/screenshots", response_class=HTMLResponse)
+async def view_screenshots():
+    """View all captured screenshots in browser"""
+    if not screenshots:
+        return "<h2>No screenshots yet — run a booking first</h2>"
+    
+    html = "<html><body style='background:#111;color:#fff;font-family:sans-serif'>"
+    html += "<h1>Playwright Screenshots</h1>"
+    for name, data in screenshots.items():
+        html += f"<h3>{name}</h3>"
+        html += f"<img src='data:image/png;base64,{data}' style='max-width:100%;border:2px solid #444;margin-bottom:20px'><br>"
+    html += "</body></html>"
+    return html
+
+async def save_screenshot(page, name: str):
+    """Save screenshot to memory"""
+    try:
+        data = await page.screenshot(type="png")
+        screenshots[name] = base64.b64encode(data).decode()
+        logger.info(f"Screenshot saved: {name}")
+    except Exception as e:
+        logger.warning(f"Screenshot failed: {e}")
+
 @app.post("/book")
 async def book_appointment(request: Request, booking: BookingRequest):
     auth = request.headers.get("Authorization") or request.headers.get("authorization") or ""
     if auth != f"Bearer {API_SECRET}":
         raise HTTPException(status_code=401, detail="Unauthorized")
     logger.info(f"Booking: {booking.customer_name} | {booking.service} | {booking.preferred_date} {booking.preferred_time}")
+    
+    # Clear previous screenshots
+    screenshots.clear()
+    
     result = await run_wegest_booking(booking)
     return result
 
@@ -62,99 +94,95 @@ async def run_wegest_booking(request: BookingRequest) -> dict:
             logger.info("Step 1: Loading login page...")
             await page.goto(LOGIN_URL, wait_until="networkidle", timeout=30000)
             await page.wait_for_timeout(2000)
+            await save_screenshot(page, "01_login_page")
 
             # ── STEP 2: Fill credentials ──────────────────────
             logger.info("Step 2: Filling credentials...")
             await page.fill("input[name='username']", WEGEST_USER)
             await page.fill("input[name='password']", WEGEST_PASSWORD)
             await page.evaluate("document.querySelector('input[name=\"codice\"]').value = '1'")
-            logger.info("Credentials filled")
+            await save_screenshot(page, "02_filled_credentials")
 
-            # ── STEP 3: Submit and wait for AJAX response ─────
-            logger.info("Step 3: Submitting login via AJAX...")
+            # ── STEP 3: Click login and wait for AJAX ─────────
+            logger.info("Step 3: Clicking login...")
 
-            # Listen for network responses to detect login success/failure
-            login_response_data = {}
+            # Intercept AJAX responses
+            login_responses = []
+            async def capture_response(response):
+                try:
+                    text = await response.text()
+                    login_responses.append({
+                        "url": response.url,
+                        "status": response.status,
+                        "body": text[:500]
+                    })
+                    logger.info(f"Response: {response.url} [{response.status}] {text[:200]}")
+                except:
+                    pass
+            page.on("response", capture_response)
 
-            async def handle_response(response):
-                url = response.url
-                if "login" in url.lower() or "accedi" in url.lower() or "auth" in url.lower():
-                    try:
-                        text = await response.text()
-                        logger.info(f"Login response URL: {url}")
-                        logger.info(f"Login response: {text[:300]}")
-                        login_response_data["url"] = url
-                        login_response_data["body"] = text
-                    except:
-                        pass
-
-            page.on("response", handle_response)
-
-            # Click the login div button
             await page.click("div.button")
-            logger.info("Login button clicked")
+            
+            # Wait for DOM changes — Wegest is SPA, login changes DOM not URL
+            try:
+                await page.wait_for_function(
+                    """() => {
+                        const login = document.getElementById('pannello_login');
+                        const menu = document.getElementById('menu');
+                        if (!login || !menu) return false;
+                        const loginHidden = window.getComputedStyle(login).display === 'none';
+                        const menuVisible = window.getComputedStyle(menu).display !== 'none';
+                        return loginHidden || menuVisible;
+                    }""",
+                    timeout=10000
+                )
+                logger.info("DOM changed — login successful!")
+            except Exception as e:
+                logger.warning(f"DOM wait timeout: {e}")
 
-            # Wait for AJAX to complete
-            await page.wait_for_timeout(4000)
+            await page.wait_for_timeout(3000)
+            await save_screenshot(page, "03_after_login")
 
-            # Check if the hidden wrapper_contents/wrapper_menu appeared
-            # Wegest shows wrapper_menu after successful login
-            wrapper_visible = await page.evaluate("""
+            # Log all captured responses
+            logger.info(f"Captured {len(login_responses)} responses during login")
+            for r in login_responses:
+                logger.info(f"  [{r['status']}] {r['url']} → {r['body'][:200]}")
+
+            # Check login state
+            login_hidden = await page.evaluate("""
                 () => {
-                    const menu = document.getElementById('wrapper_menu') || 
-                                 document.querySelector('.wrapper_menu') ||
-                                 document.querySelector('#menu');
-                    if (menu) {
-                        const style = window.getComputedStyle(menu);
-                        return style.display !== 'none';
-                    }
-                    return false;
+                    const el = document.getElementById('pannello_login');
+                    return !el || window.getComputedStyle(el).display === 'none';
+                }
+            """)
+            menu_visible = await page.evaluate("""
+                () => {
+                    const el = document.getElementById('menu');
+                    return el && window.getComputedStyle(el).display !== 'none';
                 }
             """)
 
-            logger.info(f"Menu visible after login: {wrapper_visible}")
-            logger.info(f"Login response data: {login_response_data}")
+            logger.info(f"Login panel hidden: {login_hidden} | Menu visible: {menu_visible}")
 
-            # Also check if pannello_login is now hidden
-            login_panel_hidden = await page.evaluate("""
-                () => {
-                    const panel = document.getElementById('pannello_login');
-                    if (panel) {
-                        const style = window.getComputedStyle(panel);
-                        return style.display === 'none';
-                    }
-                    return true; // panel not found = logged in
-                }
-            """)
-
-            logger.info(f"Login panel hidden: {login_panel_hidden}")
-
-            # Check cookie/session
-            cookies = await context.cookies()
-            cookie_names = [c['name'] for c in cookies]
-            logger.info(f"Cookies after login: {cookie_names}")
-
-            if not wrapper_visible and not login_panel_hidden:
-                # Log the page source for debugging
-                html = await page.content()
-                logger.error(f"Login may have failed. Page excerpt: {html[1000:2000]}")
+            if not login_hidden and not menu_visible:
                 raise Exception(
-                    f"Login failed. Menu not visible, login panel still showing. "
-                    f"Username: '{WEGEST_USER}'. Check credentials in Railway variables."
+                    f"Login failed. Username='{WEGEST_USER}' password_len={len(WEGEST_PASSWORD)}. "
+                    f"Check /screenshots to see what Playwright sees. "
+                    f"Responses: {login_responses}"
                 )
 
-            logger.info("Login SUCCESS!")
+            logger.info("LOGIN SUCCESS!")
+            await save_screenshot(page, "04_dashboard")
 
-            # ── STEP 4: Navigate to Agenda ────────────────────
-            logger.info("Step 4: Navigating to Agenda...")
-
-            # Wegest is a SPA — click the agenda menu item
+            # ── STEP 4: Click Agenda ──────────────────────────
+            logger.info("Step 4: Opening Agenda...")
             await page.wait_for_selector("[pannello='pannello_agenda']", timeout=10000)
             await page.click("[pannello='pannello_agenda']")
             await page.wait_for_timeout(2000)
+            await save_screenshot(page, "05_agenda")
             logger.info("Agenda opened")
 
-            # ── STEP 5: Select target date ────────────────────
+            # ── STEP 5: Select date ───────────────────────────
             logger.info(f"Step 5: Selecting date {request.preferred_date}...")
             target_date = datetime.strptime(request.preferred_date, "%Y-%m-%d")
             day   = target_date.day
@@ -165,30 +193,29 @@ async def run_wegest_booking(request: BookingRequest) -> dict:
             await page.wait_for_selector(date_selector, timeout=10000)
             await page.click(date_selector)
             await page.wait_for_timeout(2000)
+            await save_screenshot(page, "06_date_selected")
             logger.info(f"Date selected: {request.preferred_date}")
 
             # ── STEP 6: Click time slot ───────────────────────
-            logger.info(f"Step 6: Clicking time slot {request.preferred_time}...")
-            time_selectors = [
-                f"[data-ora='{request.preferred_time}']",
-                f"[data-time='{request.preferred_time}']",
-            ]
-            for sel in time_selectors:
+            logger.info(f"Step 6: Time slot {request.preferred_time}...")
+            for sel in [f"[data-ora='{request.preferred_time}']", f"[data-time='{request.preferred_time}']"]:
                 try:
                     await page.click(sel, timeout=3000)
-                    logger.info(f"Time slot clicked: {sel}")
+                    logger.info(f"Time clicked: {sel}")
                     break
                 except:
                     continue
             await page.wait_for_timeout(2000)
+            await save_screenshot(page, "07_time_slot")
 
             # ── STEP 7: Customer search ───────────────────────
-            logger.info(f"Step 7: Customer: {request.customer_name}...")
+            logger.info(f"Step 7: Customer {request.customer_name}...")
             try:
                 await page.wait_for_selector("input[name='cerca_cliente']", timeout=8000)
                 first_name = request.customer_name.strip().split()[0]
                 await page.fill("input[name='cerca_cliente']", first_name)
                 await page.wait_for_timeout(1500)
+                await save_screenshot(page, "08_customer_search")
 
                 results = await page.query_selector_all(".modale_body button.rimira")
                 found = False
@@ -197,11 +224,10 @@ async def run_wegest_booking(request: BookingRequest) -> dict:
                     if first_name.lower() in text:
                         await r.click()
                         found = True
-                        logger.info(f"Customer found: {text.strip()}")
+                        logger.info(f"Customer: {text.strip()}")
                         break
 
                 if not found:
-                    logger.info("Creating new customer...")
                     new_btn = await page.query_selector(".pulsanti button.primary")
                     if new_btn:
                         await new_btn.click()
@@ -216,60 +242,58 @@ async def run_wegest_booking(request: BookingRequest) -> dict:
                         save = await page.query_selector(".pulsanti button.primary")
                         if save: await save.click()
                         await page.wait_for_timeout(1500)
-            except Exception as e:
-                logger.warning(f"Customer step: {e}")
+                        logger.info("New customer created")
 
+            except Exception as e:
+                logger.warning(f"Customer: {e}")
+            await save_screenshot(page, "09_customer_done")
             await page.wait_for_timeout(1000)
 
             # ── STEP 8: Select service ────────────────────────
-            logger.info(f"Step 8: Service: {request.service}...")
+            logger.info(f"Step 8: Service {request.service}...")
             keywords = request.service.lower().split()
             els = await page.query_selector_all(".pulsanti_tab .servizi button, .servizi button")
             for el in els:
                 text = (await el.inner_text()).lower()
                 if any(k in text for k in keywords):
                     await el.click()
-                    logger.info(f"Service selected: {text.strip()}")
+                    logger.info(f"Service: {text.strip()}")
                     break
             await page.wait_for_timeout(1000)
+            await save_screenshot(page, "10_service_selected")
 
             # ── STEP 9: Select operator ───────────────────────
             if request.operator_preference.lower() != "prima disponibile":
-                logger.info(f"Step 9: Operator: {request.operator_preference}...")
                 ops = await page.query_selector_all(".pulsanti_tab .operatori button, .operatori button")
                 for op in ops:
                     text = (await op.inner_text()).lower()
                     if request.operator_preference.lower() in text:
                         await op.click()
-                        logger.info(f"Operator selected: {text.strip()}")
+                        logger.info(f"Operator: {text.strip()}")
                         break
             await page.wait_for_timeout(1000)
 
             # ── STEP 10: Add appointment ──────────────────────
             logger.info("Step 10: Adding appointment...")
-            add_selectors = [
-                ".form_appuntamento .pulsanti button.aggiungi",
-                "button.aggiungi",
-                "button:has-text('Aggiungi appuntamento')",
-            ]
             added = False
-            for sel in add_selectors:
+            for sel in ["button.aggiungi", ".form_appuntamento .pulsanti button.aggiungi", "button:has-text('Aggiungi appuntamento')"]:
                 try:
                     await page.click(sel, timeout=5000)
                     added = True
-                    logger.info(f"Appointment added: {sel}")
+                    logger.info(f"Added: {sel}")
                     break
                 except:
                     continue
 
-            await page.wait_for_load_state("networkidle", timeout=15000)
-            await page.wait_for_timeout(2000)
+            await page.wait_for_timeout(3000)
+            await save_screenshot(page, "11_final_result")
 
             content = (await page.content()).lower()
             success = request.customer_name.lower().split()[0] in content or added
 
             await browser.close()
             logger.info(f"Result: {'SUCCESS' if success else 'UNCERTAIN'}")
+            logger.info("View screenshots at /screenshots endpoint")
 
             return {
                 "success": success,
@@ -278,13 +302,20 @@ async def run_wegest_booking(request: BookingRequest) -> dict:
                 "date": request.preferred_date,
                 "time": request.preferred_time,
                 "operator": request.operator_preference,
-                "message": "Appointment created in Wegest" if success else "Submitted — verify in Wegest"
+                "message": "Appointment created in Wegest" if success else "Submitted — verify in Wegest",
+                "screenshots_url": "/screenshots"
             }
 
         except Exception as e:
             logger.error(f"Error: {str(e)}")
+            await save_screenshot(page, "ERROR_screenshot")
             try:
                 await browser.close()
             except:
                 pass
-            return {"success": False, "error": str(e), "message": "Wegest booking automation failed"}
+            return {
+                "success": False,
+                "error": str(e),
+                "message": "Failed — check /screenshots to see what happened",
+                "screenshots_url": "/screenshots"
+            }

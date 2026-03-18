@@ -1,8 +1,7 @@
 """
 Agent Andrea - Wegest Direct Booking Service
-Fixed: dismiss post-login "chiusura cassa" modal
-Fixed: handle modal blocking agenda interactions
-Fixed: date navigation and time slot clicking
+Fixed: persistent modal dismissal loop before any interaction
+Fixed: false positive success detection
 """
 
 from fastapi import FastAPI, HTTPException, Request
@@ -62,87 +61,73 @@ async def screenshot(page, name: str):
 
 
 async def dismiss_all_modals(page, label=""):
-    """Aggressively dismiss any modals/overlays blocking the page."""
-    logger.info(f"🔍 Checking for modals to dismiss... ({label})")
-    dismissed = False
+    """
+    Keep clicking any visible modal buttons until the page is clear.
+    Loops up to 5 times to handle stacked modals.
+    """
+    logger.info(f"🔍 Modal sweep: {label}")
 
-    # Attempt 1: Click "OK, PROCEDI" button
-    for selector in [
-        "button:has-text('OK, PROCEDI')",
-        "button:has-text('Ok, procedi')",
-        "button:has-text('PROCEDI')",
-        "button:has-text('Procedi')",
-    ]:
-        try:
-            btn = page.locator(selector).first
-            if await btn.is_visible(timeout=1000):
-                await btn.click()
-                logger.info(f"✅ Clicked: {selector}")
-                dismissed = True
-                await page.wait_for_timeout(2000)
-                break
-        except:
-            continue
+    for attempt in range(5):
+        dismissed = False
 
-    # Attempt 2: Click any ANNULLA (cancel) button
-    if not dismissed:
-        try:
-            annulla = page.locator("button:has-text('ANNULLA'), a:has-text('ANNULLA')").first
-            if await annulla.is_visible(timeout=1000):
-                await annulla.click()
-                logger.info("✅ Clicked ANNULLA")
-                dismissed = True
-                await page.wait_for_timeout(2000)
-        except:
-            pass
-
-    # Attempt 3: Click any close button on modals
-    if not dismissed:
-        try:
-            close_btns = page.locator(".modale .chiudi, .modale_close, .close, [class*='close']")
-            count = await close_btns.count()
-            for i in range(count):
-                btn = close_btns.nth(i)
-                if await btn.is_visible(timeout=500):
-                    await btn.click()
-                    logger.info(f"✅ Clicked close button {i}")
-                    dismissed = True
-                    await page.wait_for_timeout(1500)
-                    break
-        except:
-            pass
-
-    # Attempt 4: Force-remove any modal overlays via JS
-    try:
-        removed = await page.evaluate("""
+        # Check if any modal-like overlay is visible
+        has_modal = await page.evaluate("""
             () => {
-                let removed = 0;
-                // Remove modal overlays
-                document.querySelectorAll('.modale_overlay, .overlay, .modal-backdrop').forEach(el => {
-                    el.style.display = 'none';
-                    removed++;
-                });
-                // Hide modal containers
-                document.querySelectorAll('.modale, .modal, [class*="modale"]').forEach(el => {
-                    if (el.style.display !== 'none' && window.getComputedStyle(el).display !== 'none') {
-                        el.style.display = 'none';
-                        removed++;
+                const modals = document.querySelectorAll('.modale, .modal, [class*="modale"], .overlay, .modale_overlay');
+                for (const m of modals) {
+                    const style = window.getComputedStyle(m);
+                    if (style.display !== 'none' && style.visibility !== 'hidden' && style.opacity !== '0') {
+                        return true;
                     }
-                });
-                return removed;
+                }
+                return false;
             }
         """)
-        if removed > 0:
-            logger.info(f"✅ Force-removed {removed} modal elements via JS")
-            dismissed = True
-            await page.wait_for_timeout(1000)
-    except Exception as e:
-        logger.warning(f"JS modal removal failed: {e}")
 
-    if not dismissed:
-        logger.info("No modals found to dismiss")
+        if not has_modal:
+            logger.info(f"  ✅ No modals visible (attempt {attempt + 1})")
+            break
 
-    return dismissed
+        logger.info(f"  ⚠️ Modal detected (attempt {attempt + 1}) — dismissing...")
+
+        # Try all known button patterns in priority order
+        button_selectors = [
+            "button:has-text('OK, PROCEDI')",
+            "button:has-text('Ok, procedi')",
+            "button:has-text('PROCEDI')",
+            "button:has-text('OK')",
+            "button:has-text('Ok')",
+            "a:has-text('ANNULLA')",
+            "button:has-text('ANNULLA')",
+            ".modale button",
+            ".modale a",
+        ]
+
+        for sel in button_selectors:
+            try:
+                btn = page.locator(sel).first
+                if await btn.is_visible(timeout=1000):
+                    await btn.click()
+                    logger.info(f"  ✅ Clicked: {sel}")
+                    dismissed = True
+                    await page.wait_for_timeout(2000)
+                    break
+            except:
+                continue
+
+        # If no button worked, force remove via JS
+        if not dismissed:
+            logger.info("  🔧 Force-removing modals via JS...")
+            await page.evaluate("""
+                () => {
+                    document.querySelectorAll('.modale, .modal, [class*="modale"], .overlay, .modale_overlay, .modal-backdrop').forEach(el => {
+                        el.style.display = 'none';
+                    });
+                }
+            """)
+            await page.wait_for_timeout(1500)
+
+    logger.info(f"  Modal sweep complete: {label}")
 
 
 @app.post("/book")
@@ -191,27 +176,22 @@ async def run_wegest_booking(request: BookingRequest) -> dict:
             # ── STEP 3: Click login ───────────────────────────
             logger.info("Step 3: Clicking login button...")
             await page.click("div.button")
-            logger.info("Login button clicked — waiting for dashboard to load...")
+            logger.info("Login button clicked — waiting for dashboard...")
 
             try:
                 await page.wait_for_function(
                     """() => {
                         const loginPanel = document.getElementById('pannello_login');
                         const menu = document.getElementById('menu');
-                        
-                        const loginHidden = loginPanel && 
-                            window.getComputedStyle(loginPanel).display === 'none';
-                        const menuVisible = menu && 
-                            window.getComputedStyle(menu).display !== 'none';
+                        const loginHidden = loginPanel && window.getComputedStyle(loginPanel).display === 'none';
+                        const menuVisible = menu && window.getComputedStyle(menu).display !== 'none';
                         const contents = document.querySelector('.wrapper_contents');
-                        const hasContents = contents && 
-                            window.getComputedStyle(contents).display !== 'none';
-                        
+                        const hasContents = contents && window.getComputedStyle(contents).display !== 'none';
                         return loginHidden || menuVisible || hasContents;
                     }""",
                     timeout=60000
                 )
-                logger.info("✅ Dashboard loaded — login successful!")
+                logger.info("✅ Dashboard loaded!")
             except Exception as e:
                 logger.warning(f"DOM wait timeout: {e}")
                 await screenshot(page, "03_login_timeout")
@@ -219,7 +199,7 @@ async def run_wegest_booking(request: BookingRequest) -> dict:
             await page.wait_for_timeout(10000)
             await screenshot(page, "03_after_login")
 
-            # Verify login state
+            # Verify login
             login_visible = await page.evaluate("""
                 () => {
                     const el = document.getElementById('pannello_login');
@@ -237,29 +217,31 @@ async def run_wegest_booking(request: BookingRequest) -> dict:
             logger.info(f"Login panel visible: {login_visible} | Menu visible: {menu_visible}")
 
             if login_visible and not menu_visible:
-                raise Exception(
-                    f"Login failed. Username='{WEGEST_USER}'. Check /screenshots."
-                )
+                raise Exception(f"Login failed. Check /screenshots.")
 
             logger.info("🎉 LOGIN SUCCESS!")
             await screenshot(page, "04_dashboard")
 
-            # ── STEP 3.5: Dismiss post-login modals ──────────
+            # ══════════════════════════════════════════════════
+            # STEP 3.5: DISMISS ALL MODALS BEFORE DOING ANYTHING
+            # This is the critical fix — loop until page is clear
+            # ══════════════════════════════════════════════════
+            logger.info("Step 3.5: Clearing all post-login modals...")
             await dismiss_all_modals(page, "post-login")
-            await screenshot(page, "04b_after_modal_dismiss")
+            await page.wait_for_timeout(2000)
+            await screenshot(page, "04b_modals_cleared")
 
             # ── STEP 4: Click Agenda ──────────────────────────
             logger.info("Step 4: Opening Agenda...")
             await page.wait_for_selector("[pannello='pannello_agenda']", timeout=10000)
             await page.click("[pannello='pannello_agenda']")
             await page.wait_for_timeout(5000)
-            await screenshot(page, "05_agenda")
-            logger.info("Agenda opened")
 
-            # Dismiss modals again — they can reappear after navigation
-            await dismiss_all_modals(page, "after-agenda")
+            # Clear modals again after Agenda opens
+            await dismiss_all_modals(page, "after-agenda-open")
             await page.wait_for_timeout(2000)
-            await screenshot(page, "05b_agenda_clean")
+            await screenshot(page, "05_agenda_clean")
+            logger.info("Agenda opened and modals cleared")
 
             # ── STEP 5: Select date ───────────────────────────
             logger.info(f"Step 5: Selecting date {request.preferred_date}...")
@@ -268,44 +250,53 @@ async def run_wegest_booking(request: BookingRequest) -> dict:
             month = target_date.month
             year = target_date.year
 
-            # Try clicking the date — use force:true to bypass overlay issues
             date_selector = f".data[giorno='{day}'][mese='{month}'][anno='{year}']"
-            logger.info(f"Looking for date element: {date_selector}")
+            logger.info(f"Date selector: {date_selector}")
 
+            # First verify no modals are blocking
+            await dismiss_all_modals(page, "before-date-click")
+
+            date_clicked = False
             try:
                 await page.wait_for_selector(date_selector, timeout=10000)
-                # Use force click to bypass any remaining overlays
-                await page.click(date_selector, force=True)
-                logger.info(f"Date clicked (force): {request.preferred_date}")
+                await page.click(date_selector, timeout=5000)
+                date_clicked = True
+                logger.info(f"✅ Date clicked normally")
             except Exception as e:
-                logger.warning(f"Direct date click failed: {e}")
-                # Fallback: click via JavaScript
-                clicked = await page.evaluate(f"""
+                logger.warning(f"Normal date click failed: {e}")
+                # Try force click
+                try:
+                    await page.click(date_selector, force=True, timeout=5000)
+                    date_clicked = True
+                    logger.info(f"✅ Date clicked (force)")
+                except:
+                    pass
+
+            if not date_clicked:
+                # JS fallback
+                clicked_js = await page.evaluate(f"""
                     () => {{
                         const el = document.querySelector(".data[giorno='{day}'][mese='{month}'][anno='{year}']");
-                        if (el) {{
-                            el.click();
-                            return true;
-                        }}
+                        if (el) {{ el.click(); return true; }}
                         return false;
                     }}
                 """)
-                if clicked:
-                    logger.info(f"Date clicked via JS: {request.preferred_date}")
+                if clicked_js:
+                    date_clicked = True
+                    logger.info("✅ Date clicked via JS")
                 else:
-                    logger.warning("Could not find date element at all")
+                    logger.error("❌ Could not click date at all")
 
             await page.wait_for_timeout(3000)
             await screenshot(page, "06_date_selected")
 
-            # Dismiss modals again after date selection
+            # Dismiss "Selezionare una data" or other warnings
             await dismiss_all_modals(page, "after-date")
             await page.wait_for_timeout(1000)
 
             # ── STEP 6: Click time slot ───────────────────────
             logger.info(f"Step 6: Time slot {request.preferred_time}...")
 
-            # Parse time for multiple formats
             time_parts = request.preferred_time.split(":")
             hour = time_parts[0]
             minute = time_parts[1] if len(time_parts) > 1 else "00"
@@ -332,8 +323,7 @@ async def run_wegest_booking(request: BookingRequest) -> dict:
                     continue
 
             if not time_clicked:
-                # Fallback: try clicking on the agenda grid by coordinates
-                logger.info("Time selectors failed — trying JS click on time cells...")
+                logger.info("Time selectors failed — trying JS...")
                 time_clicked = await page.evaluate(f"""
                     () => {{
                         const cells = document.querySelectorAll('td[ora], [data-ora], [data-time]');
@@ -348,20 +338,18 @@ async def run_wegest_booking(request: BookingRequest) -> dict:
                     }}
                 """)
                 if time_clicked:
-                    logger.info(f"✅ Time clicked via JS")
+                    logger.info("✅ Time clicked via JS")
                 else:
                     logger.warning("⚠️ Could not find time slot")
 
             await page.wait_for_timeout(3000)
             await screenshot(page, "07_time_slot_clicked")
-
-            # Dismiss any modal that appeared
             await dismiss_all_modals(page, "after-time")
 
             # ── STEP 7: Customer search ───────────────────────
             logger.info(f"Step 7: Customer {request.customer_name}...")
+            customer_found = False
             try:
-                # Wait for the appointment form / customer search to appear
                 customer_input = None
                 for sel in [
                     "input[name='cerca_cliente']",
@@ -383,20 +371,18 @@ async def run_wegest_booking(request: BookingRequest) -> dict:
                     await page.wait_for_timeout(2000)
                     await screenshot(page, "08_customer_search")
 
-                    # Look for search results
                     results = await page.query_selector_all(
                         ".modale_body button.rimira, .risultati_ricerca button, .lista_clienti button, .cliente_risultato"
                     )
-                    found = False
                     for r in results:
                         text = (await r.inner_text()).lower()
                         if first_name.lower() in text:
                             await r.click()
-                            found = True
+                            customer_found = True
                             logger.info(f"✅ Customer found: {text.strip()}")
                             break
 
-                    if not found:
+                    if not customer_found:
                         logger.info("Customer not found — creating new...")
                         new_btn = await page.query_selector(
                             ".pulsanti button.primary, button:has-text('Nuovo'), button:has-text('nuovo')"
@@ -415,11 +401,12 @@ async def run_wegest_booking(request: BookingRequest) -> dict:
                             if cell:
                                 await cell.fill(request.caller_phone)
                             save = await page.query_selector(
-                                ".pulsanti button.primary, button:has-text('Salva'), button:has-text('salva')"
+                                ".pulsanti button.primary, button:has-text('Salva')"
                             )
                             if save:
                                 await save.click()
                             await page.wait_for_timeout(2000)
+                            customer_found = True
                             logger.info("✅ New customer created")
                 else:
                     logger.warning("Could not find customer search input")
@@ -444,14 +431,14 @@ async def run_wegest_booking(request: BookingRequest) -> dict:
                     text = (await el.inner_text()).lower()
                     if any(k in text for k in keywords):
                         await el.click()
-                        logger.info(f"✅ Service selected: {text.strip()}")
                         service_selected = True
+                        logger.info(f"✅ Service selected: {text.strip()}")
                         break
                 except:
                     continue
 
             if not service_selected:
-                logger.warning("Could not find service button — trying JS...")
+                logger.warning("Service not found via buttons — trying JS...")
                 service_kw = request.service.lower()
                 await page.evaluate(f"""
                     () => {{
@@ -507,32 +494,49 @@ async def run_wegest_booking(request: BookingRequest) -> dict:
                 except:
                     continue
 
-            if not added:
-                # JS fallback
-                logger.info("Trying JS fallback for add button...")
-                added = await page.evaluate("""
-                    () => {
-                        const buttons = document.querySelectorAll('button');
-                        for (const btn of buttons) {
-                            const text = btn.textContent.toLowerCase();
-                            if (text.includes('aggiungi') || text.includes('salva') || text.includes('conferma')) {
-                                btn.click();
-                                return true;
-                            }
-                        }
-                        return false;
-                    }
-                """)
-
             await page.wait_for_timeout(3000)
             await screenshot(page, "11_final_result")
 
-            content = (await page.content()).lower()
-            success = request.customer_name.lower().split()[0] in content or added
+            # ── VERIFY: Check if appointment actually appears ──
+            await screenshot(page, "12_verification")
+
+            # More reliable success check
+            page_content = (await page.content()).lower()
+            first_name = request.customer_name.lower().split()[0]
+
+            # Check the agenda visually for the customer name
+            has_customer_on_page = first_name in page_content
+
+            # Check if we're still on agenda (not stuck on error)
+            on_agenda = await page.evaluate("""
+                () => {
+                    const agenda = document.getElementById('pannello_agenda');
+                    if (!agenda) return false;
+                    return window.getComputedStyle(agenda).display !== 'none';
+                }
+            """)
+
+            # Check for any error modals still showing
+            has_error_modal = await page.evaluate("""
+                () => {
+                    const modals = document.querySelectorAll('.modale, .modal, [class*="modale"]');
+                    for (const m of modals) {
+                        const style = window.getComputedStyle(m);
+                        if (style.display !== 'none' && style.visibility !== 'hidden') {
+                            return true;
+                        }
+                    }
+                    return false;
+                }
+            """)
+
+            logger.info(f"Verification — on_agenda: {on_agenda} | customer_on_page: {has_customer_on_page} | error_modal: {has_error_modal} | added_flag: {added}")
+
+            # Only count as success if we're on agenda, no error modals, and either customer shows or add button was clicked
+            success = on_agenda and not has_error_modal and (has_customer_on_page or added)
 
             await browser.close()
             logger.info(f"🏁 Result: {'✅ SUCCESS' if success else '⚠️ UNCERTAIN — check Wegest'}")
-            logger.info("👁️ View screenshots at /screenshots")
 
             return {
                 "success": success,
@@ -541,7 +545,7 @@ async def run_wegest_booking(request: BookingRequest) -> dict:
                 "date": request.preferred_date,
                 "time": request.preferred_time,
                 "operator": request.operator_preference,
-                "message": "✅ Appointment created in Wegest" if success else "⚠️ Submitted — verify in Wegest",
+                "message": "✅ Appointment created in Wegest" if success else "⚠️ Could not confirm — please verify in Wegest",
                 "screenshots_url": "https://agent-andrea-playwright-production.up.railway.app/screenshots"
             }
 

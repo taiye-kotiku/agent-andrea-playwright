@@ -176,7 +176,7 @@ async def run_wegest_booking(request: BookingRequest) -> dict:
             except:
                 await screenshot(page, "03_login_timeout")
 
-            await page.wait_for_timeout(10000)
+            await page.wait_for_timeout(30000)
             await screenshot(page, "03_after_login")
 
             login_visible = await page.evaluate("""() => {

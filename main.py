@@ -3,6 +3,7 @@ Agent Andrea - Wegest Direct Booking Service
 All selectors verified against actual Wegest HTML (March 2025)
 """
 
+from dotenv import load_dotenv
 from fastapi import FastAPI, HTTPException, Request
 from fastapi.responses import HTMLResponse
 from pydantic import BaseModel
@@ -11,12 +12,14 @@ from datetime import datetime
 import os
 import base64
 import logging
+import dotenv
 
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
+load_dotenv()
 
 app = FastAPI(title="Agent Andrea - Wegest Booking Service")
-
+DEBUG_SCREENSHOTS = os.environ.get("DEBUG_SCREENSHOTS", "false").lower() == "true"
 screenshots = {}
 
 
@@ -57,7 +60,9 @@ async def view_screenshots():
     return html
 
 
-async def snap(page, name: str):
+async def snap(page, name: str, force: bool = False):
+    if not DEBUG_SCREENSHOTS and not force:
+        return
     try:
         data = await page.screenshot(type="png", full_page=True)
         screenshots[name] = base64.b64encode(data).decode()
@@ -511,7 +516,7 @@ async def run_wegest_booking(request: BookingRequest) -> dict:
 
             except Exception as e:
                 logger.warning(f"Customer error: {e}")
-                await snap(page, "07_ERROR")
+                await snap(page, "07_ERROR", force=True)
 
             await page.wait_for_timeout(2000)
 
@@ -672,7 +677,7 @@ async def run_wegest_booking(request: BookingRequest) -> dict:
                     await page.click(".azioni .button.rimira.primary.aggiungi", timeout=5000)
                     added = "playwright"
                 except Exception:
-                    await snap(page, "10_ERROR")
+                    await snap(page, "10_ERROR", force=True)
 
             await page.wait_for_timeout(5000)
             await snap(page, "11_saved")
@@ -731,7 +736,7 @@ async def run_wegest_booking(request: BookingRequest) -> dict:
 
         except Exception as e:
             logger.error(f"❌ {e}")
-            await snap(page, "ERROR")
+            await snap(page, "ERROR", force=True)
             try:
                 await browser.close()
             except Exception:
@@ -1069,7 +1074,7 @@ async def run_availability_check(request: AvailabilityRequest) -> dict:
 
         except Exception as e:
             logger.error(f"❌ Availability error: {e}")
-            await snap(page, "avail_ERROR")
+            await snap(page, "avail_ERROR", force=True)
             try:
                 await browser.close()
             except Exception:

@@ -13,6 +13,10 @@ import os
 import base64
 import logging
 import dotenv
+import json
+import asyncio
+from pathlib import Path
+from datetime import timedelta
 
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
@@ -22,6 +26,14 @@ app = FastAPI(title="Agent Andrea - Wegest Booking Service")
 DEBUG_SCREENSHOTS = os.environ.get("DEBUG_SCREENSHOTS", "false").lower() == "true"
 screenshots = {}
 
+CACHE_FILE = Path("availability_cache.json")
+
+availability_cache = {
+    "updated_at": None,
+    "days": {}
+}
+
+cache_lock = asyncio.Lock()
 
 def js_escape(s: str) -> str:
     return s.replace("\\", "\\\\").replace("'", "\\'").replace('"', '\\"').replace("\n", "\\n")
@@ -40,6 +52,47 @@ class AvailabilityRequest(BaseModel):
     operator_preference: str = "prima disponibile"
 
 API_SECRET = os.environ.get("API_SECRET", "changeme")
+
+def load_cache_from_disk():
+    global availability_cache
+    try:
+        if CACHE_FILE.exists():
+            availability_cache = json.loads(CACHE_FILE.read_text(encoding="utf-8"))
+            logger.info("📦 Availability cache loaded from disk")
+    except Exception as e:
+        logger.warning(f"Failed to load cache from disk: {e}")
+
+
+def save_cache_to_disk():
+    try:
+        CACHE_FILE.write_text(
+            json.dumps(availability_cache, ensure_ascii=False, indent=2),
+            encoding="utf-8"
+        )
+        logger.info("💾 Availability cache saved to disk")
+    except Exception as e:
+        logger.warning(f"Failed to save cache to disk: {e}")
+
+
+async def set_cached_day(date_str: str, payload: dict):
+    async with cache_lock:
+        availability_cache["days"][date_str] = payload
+        availability_cache["updated_at"] = datetime.utcnow().isoformat()
+        save_cache_to_disk()
+
+
+async def get_cached_day(date_str: str):
+    async with cache_lock:
+        return availability_cache["days"].get(date_str)
+
+
+async def invalidate_cached_day(date_str: str):
+    async with cache_lock:
+        if date_str in availability_cache["days"]:
+            del availability_cache["days"][date_str]
+            availability_cache["updated_at"] = datetime.utcnow().isoformat()
+            save_cache_to_disk()
+            logger.info(f"🗑️ Invalidated cache for {date_str}")
 
 
 @app.get("/health")
@@ -714,6 +767,8 @@ async def run_wegest_booking(request: BookingRequest) -> dict:
             """)
 
             success = bool(added) and form_gone and not has_error and not is_processing
+            if success:
+                await invalidate_cached_day(request.preferred_date)
 
             await snap(page, "12_final")
             await browser.close()
@@ -748,9 +803,96 @@ async def run_wegest_booking(request: BookingRequest) -> dict:
                 "screenshots_url": "https://agent-andrea-playwright-production.up.railway.app/screenshots"
             }
 
+async def refresh_availability_cache_forever():
+    await asyncio.sleep(10)  # let app boot first
 
+    while True:
+        try:
+            logger.info("🔄 Background availability refresh starting...")
+
+            today = datetime.utcnow().date()
+            dates_to_refresh = []
+
+            # Today + tomorrow
+            for i in range(2):
+                d = today + timedelta(days=i)
+                dates_to_refresh.append(d.strftime("%Y-%m-%d"))
+
+            # Next 7 days
+            for i in range(2, 9):
+                d = today + timedelta(days=i)
+                dates_to_refresh.append(d.strftime("%Y-%m-%d"))
+
+            for date_str in dates_to_refresh:
+                try:
+                    req = AvailabilityRequest(
+                        preferred_date=date_str,
+                        operator_preference="prima disponibile"
+                    )
+                    fresh = await run_live_availability_check(req)
+
+                    if fresh and fresh.get("is_open") is True and "operators" in fresh:
+                        await set_cached_day(date_str, fresh)
+                        logger.info(f"✅ Refreshed cache for {date_str}")
+                    else:
+                        logger.info(f"ℹ️ Skipped cache for {date_str} (closed/no data)")
+                except Exception as e:
+                    logger.warning(f"Failed refreshing {date_str}: {e}")
+
+            logger.info("✅ Background availability refresh complete")
+
+            # Sleep 30 minutes
+            await asyncio.sleep(1800)
+
+        except Exception as e:
+            logger.error(f"Background refresh loop error: {e}")
+            await asyncio.sleep(300)
 
 async def run_availability_check(request: AvailabilityRequest) -> dict:
+    cached = await get_cached_day(request.preferred_date)
+
+    if cached:
+        logger.info(f"⚡ Availability cache HIT for {request.preferred_date}")
+
+        operator_pref = (request.operator_preference or "prima disponibile").lower()
+
+        # If no operator preference, return full cached day
+        if operator_pref == "prima disponibile":
+            return {
+                **cached,
+                "source": "cache"
+            }
+
+        # Filter operators for specific preference
+        filtered_ops = []
+        all_times = set()
+
+        for op in cached.get("operators", []):
+            if operator_pref in op.get("name", "").lower():
+                filtered_ops.append(op)
+                for t in op.get("available_slots", []):
+                    all_times.add(t)
+
+        return {
+            **cached,
+            "operators": filtered_ops,
+            "all_available_times": sorted(all_times),
+            "source": "cache"
+        }
+
+    logger.info(f"🐢 Availability cache MISS for {request.preferred_date}")
+    fresh = await run_live_availability_check(request)
+
+    # Cache only if successful/open
+    if fresh and fresh.get("is_open") is True and "operators" in fresh:
+        await set_cached_day(request.preferred_date, fresh)
+
+    return {
+        **fresh,
+        "source": "live"
+    }
+
+async def run_live_availability_check(request: AvailabilityRequest) -> dict:
     WEGEST_USER = os.environ.get("WEGEST_USERNAME", "")
     WEGEST_PASSWORD = os.environ.get("WEGEST_PASSWORD", "")
     LOGIN_URL = "https://www.i-salon.eu/login/default.asp?login=&"
@@ -1088,3 +1230,10 @@ async def run_availability_check(request: AvailabilityRequest) -> dict:
                 "operators": [],
                 "screenshots_url": "https://agent-andrea-playwright-production.up.railway.app/screenshots"
             }
+
+
+@app.on_event("startup")
+async def startup_event():
+    load_cache_from_disk()
+    asyncio.create_task(refresh_availability_cache_forever())
+    logger.info("🚀 Availability cache refresher started")

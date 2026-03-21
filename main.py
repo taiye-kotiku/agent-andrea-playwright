@@ -923,7 +923,22 @@ async def run_wegest_booking(request: BookingRequest) -> dict:
 
                 success = bool(added) and form_gone and not has_error and not is_processing
                 if success:
-                    await invalidate_cached_day(request.preferred_date)
+                    try:
+                        logger.info(f"🔄 Refreshing cache in same session for {request.preferred_date}")
+                        refreshed_day = await scrape_day_availability_from_page(
+                            page,
+                            request.preferred_date,
+                            "prima disponibile"
+                        )
+                        if refreshed_day and refreshed_day.get("is_open") is True:
+                            await set_cached_day(request.preferred_date, refreshed_day)
+                            logger.info(f"✅ Cache refreshed in same session for {request.preferred_date}")
+                        else:
+                            await invalidate_cached_day(request.preferred_date)
+                            logger.info(f"🗑️ Cache invalidated for {request.preferred_date} (refresh returned no open data)")
+                    except Exception as refresh_err:
+                        logger.warning(f"Same-session cache refresh failed: {refresh_err}")
+                        await invalidate_cached_day(request.preferred_date)
 
                 await snap(page, "12_final")
                 await browser.close()
@@ -1066,7 +1081,7 @@ async def run_live_availability_check(request: AvailabilityRequest) -> dict:
 
             try:
                 # ═══════════════════════════════════════════
-                # LOGIN (same as booking)
+                # LOGIN
                 # ═══════════════════════════════════════════
                 await page.goto(LOGIN_URL, wait_until="networkidle", timeout=60000)
                 await page.wait_for_timeout(5000)
@@ -1076,6 +1091,7 @@ async def run_live_availability_check(request: AvailabilityRequest) -> dict:
                 await page.evaluate("document.querySelector('input[name=\"codice\"]').value = '1'")
 
                 await page.click("div.button")
+
                 try:
                     await page.wait_for_function(
                         """() => {
@@ -1086,6 +1102,7 @@ async def run_live_availability_check(request: AvailabilityRequest) -> dict:
                     )
                 except Exception:
                     pass
+
                 await page.wait_for_timeout(30000)
 
                 login_visible = await page.evaluate("""() => {
@@ -1109,287 +1126,16 @@ async def run_live_availability_check(request: AvailabilityRequest) -> dict:
                 await page.wait_for_timeout(2000)
 
                 # ═══════════════════════════════════════════
-                # CLICK DATE
+                # SCRAPE REQUESTED DATE USING SAME SESSION
                 # ═══════════════════════════════════════════
-                target = datetime.strptime(request.preferred_date, "%Y-%m-%d")
-                day, month, year = target.day, target.month, target.year
-                day_name = target.strftime("%A")
-                logger.info(f"Checking date: {day}/{month}/{year} ({day_name})")
+                result = await scrape_day_availability_from_page(
+                    page,
+                    request.preferred_date,
+                    request.operator_preference
+                )
 
-                await dismiss_system_modals(page, "before-date")
-
-                date_selector = f".data[giorno='{day}'][mese='{month}'][anno='{year}']"
-
-                # Check if date exists and if salon is open
-                date_info = await page.evaluate(f"""
-                    () => {{
-                        const el = document.querySelector("{date_selector}");
-                        if (!el) return {{ exists: false }};
-                        return {{
-                            exists: true,
-                            classes: el.className,
-                            isOpen: el.classList.contains('aperto'),
-                            isClosed: el.classList.contains('chiuso'),
-                            dayName: el.classList[1] || ''
-                        }};
-                    }}
-                """)
-
-                if not date_info or not date_info.get('exists'):
-                    await snap(page, "avail_date_not_found")
-                    await browser.close()
-                    return {
-                        "date": request.preferred_date,
-                        "day_name": day_name,
-                        "is_open": False,
-                        "message": "❌ Data non visibile nel calendario — potrebbe essere troppo lontana",
-                        "available_slots": [],
-                        "operators": []
-                    }
-
-                if date_info.get('isClosed'):
-                    await snap(page, "avail_closed")
-                    await browser.close()
-                    return {
-                        "date": request.preferred_date,
-                        "day_name": day_name,
-                        "is_open": False,
-                        "message": f"❌ Il salone è chiuso il {day_name}",
-                        "available_slots": [],
-                        "operators": []
-                    }
-
-                try:
-                    await page.click(date_selector, timeout=10000)
-                except Exception:
-                    raise Exception(f"Could not click date {day}/{month}/{year}")
-
-                # Wait for grid
-                try:
-                    await page.wait_for_function(
-                        f"() => document.querySelectorAll(\".cella[giorno='{day}'][mese='{month}'][anno='{year}']\").length > 0",
-                        timeout=15000
-                    )
-                except Exception:
-                    await page.click(date_selector, timeout=5000)
-                    await page.wait_for_timeout(5000)
-
-                await page.wait_for_timeout(3000)
-                await dismiss_system_modals(page, "after-date")
-                await snap(page, "avail_grid")
-
-                # ═══════════════════════════════════════════
-                # READ THE GRID
-                # FIXED:
-                # - reads operator columns
-                # - reads appointment overlays (.appuntamento)
-                # - removes booked slots from available_slots
-                # ═══════════════════════════════════════════
-                grid_data = await page.evaluate(f"""
-                    () => {{
-                        const day = '{day}';
-                        const month = '{month}';
-                        const year = '{year}';
-
-                        const operators = [];
-
-                        const toMinutes = (h, m) => parseInt(h, 10) * 60 + parseInt(m, 10);
-
-                        const formatTime = (mins) => {{
-                            const h = Math.floor(mins / 60).toString().padStart(2, '0');
-                            const m = (mins % 60).toString().padStart(2, '0');
-                            return `${{h}}:${{m}}`;
-                        }};
-
-                        const expandQuarterHours = (startH, startM, endH, endM) => {{
-                            const out = [];
-                            let start = toMinutes(startH, startM);
-                            const end = toMinutes(endH, endM);
-
-                            // Round start down to quarter
-                            start = Math.floor(start / 15) * 15;
-
-                            // Include every 15-min slot that starts before end
-                            for (let t = start; t < end; t += 15) {{
-                                out.push(formatTime(t));
-                            }}
-
-                            return out;
-                        }};
-
-                        // 1. Build occupied slots from appointment overlays
-                        const occupiedByOperator = {{}};
-
-                        document.querySelectorAll('.appuntamento[id_operatore]').forEach(app => {{
-                            const opId = app.getAttribute('id_operatore');
-                            if (!opId) return;
-
-                            const giorno = app.getAttribute('giorno_inizio');
-                            const mese = app.getAttribute('mese_inizio');
-                            const anno = app.getAttribute('anno_inizio');
-
-                            if (giorno !== String(day) || mese !== String(month).padStart(2, '0') || anno !== String(year)) {{
-                                return;
-                            }}
-
-                            const h1 = app.getAttribute('ora_inizio');
-                            const m1 = app.getAttribute('minuto_inizio');
-                            const h2 = app.getAttribute('ora_fine_operatore');
-                            const m2 = app.getAttribute('minuto_fine_operatore');
-
-                            if (!h1 || !m1 || !h2 || !m2) return;
-
-                            const slots = expandQuarterHours(h1, m1, h2, m2);
-
-                            if (!occupiedByOperator[opId]) occupiedByOperator[opId] = new Set();
-                            slots.forEach(s => occupiedByOperator[opId].add(s));
-                        }});
-
-                        // 2. Read operator columns
-                        const columns = document.querySelectorAll('.operatore_orari[id_operatore]');
-
-                        for (const col of columns) {{
-                            const opId = col.getAttribute('id_operatore');
-                            if (opId === '0') continue;
-
-                            const isPresent = col.classList.contains('presente');
-
-                            const cells = col.querySelectorAll(
-                                ".cella[giorno='" + day + "'][mese='" + month + "'][anno='" + year + "']"
-                            );
-
-                            const available = [];
-                            const occupied = [];
-                            const absent = [];
-
-                            const bookedSet = occupiedByOperator[opId] || new Set();
-
-                            for (const cell of cells) {{
-                                const ora = cell.getAttribute('ora');
-                                const minuto = cell.getAttribute('minuto');
-                                const timeStr = ora.padStart(2, '0') + ':' + minuto.padStart(2, '0');
-
-                                if (cell.classList.contains('assente')) {{
-                                    absent.push(timeStr);
-                                }} else if (cell.classList.contains('occupata')) {{
-                                    occupied.push(timeStr);
-                                }} else if (bookedSet.has(timeStr)) {{
-                                    occupied.push(timeStr);
-                                }} else {{
-                                    available.push(timeStr);
-                                }}
-                            }}
-
-                            operators.push({{
-                                id: opId,
-                                present: isPresent,
-                                available_slots: available,
-                                occupied_slots: occupied,
-                                absent_slots: absent,
-                                total_available: available.length,
-                                total_occupied: occupied.length
-                            }});
-                        }}
-
-                        return operators;
-                    }}
-                """)
-                # ═══════════════════════════════════════════
-                # GET OPERATOR NAMES
-                # Try to find names from agenda header
-                # ═══════════════════════════════════════════
-                # ═══════════════════════════════════════════
-                # GET OPERATOR NAMES
-                # FIXED: map names ONLY from agenda header row
-                # Verified: .operatori_nomi .operatore[id_operatore] .nome
-                # ═══════════════════════════════════════════
-                op_names = await page.evaluate("""
-                    () => {
-                        const names = {};
-                        document.querySelectorAll('.operatori_nomi .operatore[id_operatore]').forEach(op => {
-                            const id = op.getAttribute('id_operatore');
-                            if (!id || id === '0') return;
-                            const nome = op.querySelector('.nome');
-                            if (nome) {
-                                names[id] = nome.textContent.trim();
-                            }
-                        });
-                        return names;
-                    }
-                """)
-
-
-                logger.info(f"Operator names found: {op_names}")
-
-                # ═══════════════════════════════════════════
-                # BUILD RESPONSE
-                # ═══════════════════════════════════════════
-                all_available = set()
-                operator_list = []
-
-                for op in grid_data:
-                    op_id = op['id']
-                    name = op_names.get(op_id, f"Operatore_{op_id}")
-
-                    # Filter by operator preference if specified
-                    if request.operator_preference.lower() != "prima disponibile":
-                        op_pref = request.operator_preference.lower().strip()
-                        if op_pref not in name.lower().strip():
-                            continue
-
-                    for slot in op['available_slots']:
-                        all_available.add(slot)
-
-                    operator_list.append({
-                        "name": name,
-                        "id": op_id,
-                        "present": op['present'],
-                        "available_slots": op['available_slots'],
-                        "occupied_slots": op['occupied_slots'],
-                        "total_available": op['total_available'],
-                        "total_occupied": op['total_occupied']
-                    })
-
-                # Sort all available times
-                sorted_times = sorted(all_available)
-
-                # Build hourly summary for easy reading
-                hourly = {}
-                for t in sorted_times:
-                    h = t.split(":")[0]
-                    if h not in hourly:
-                        hourly[h] = []
-                    hourly[h].append(t)
-
-                # Summary message
-                present_ops = [op for op in operator_list if op['present']]
-                total_slots = len(sorted_times)
-
-                if total_slots > 0:
-                    first_time = sorted_times[0]
-                    last_time = sorted_times[-1]
-                    summary = (
-                        f"✅ {total_slots} slot disponibili con {len(present_ops)} operatori, "
-                        f"dalle {first_time} alle {last_time}"
-                    )
-                else:
-                    summary = "❌ Nessuno slot disponibile per questa data"
-
-                await snap(page, "avail_final")
                 await browser.close()
-
-                return {
-                    "date": request.preferred_date,
-                    "day_name": day_name,
-                    "is_open": True,
-                    "operators": operator_list,
-                    "all_available_times": sorted_times,
-                    "hourly_summary": hourly,
-                    "total_available_slots": total_slots,
-                    "total_operators_present": len(present_ops),
-                    "summary": summary,
-                    "screenshots_url": "https://agent-andrea-playwright-production.up.railway.app/screenshots"
-                }
+                return result
 
             except Exception as e:
                 logger.error(f"❌ Availability error: {e}")
@@ -1408,13 +1154,247 @@ async def run_live_availability_check(request: AvailabilityRequest) -> dict:
                     "screenshots_url": "https://agent-andrea-playwright-production.up.railway.app/screenshots"
                 }
 
+                
 async def delayed_refresh_start():
     await asyncio.sleep(120)
     await refresh_availability_cache_forever()
+
+async def scrape_day_availability_from_page(page, preferred_date: str, operator_preference: str = "prima disponibile") -> dict:
+    target = datetime.strptime(preferred_date, "%Y-%m-%d")
+    day, month, year = target.day, target.month, target.year
+    day_name = target.strftime("%A")
+
+    logger.info(f"Scraping date in existing session: {day}/{month}/{year} ({day_name})")
+
+    await dismiss_system_modals(page, "before-date")
+
+    date_selector = f".data[giorno='{day}'][mese='{month}'][anno='{year}']"
+
+    date_info = await page.evaluate(f"""
+        () => {{
+            const el = document.querySelector("{date_selector}");
+            if (!el) return {{ exists: false }};
+            return {{
+                exists: true,
+                classes: el.className,
+                isOpen: el.classList.contains('aperto'),
+                isClosed: el.classList.contains('chiuso')
+            }};
+        }}
+    """)
+
+    if not date_info or not date_info.get("exists"):
+        return {
+            "date": preferred_date,
+            "day_name": day_name,
+            "is_open": False,
+            "message": "❌ Data non visibile nel calendario",
+            "operators": []
+        }
+
+    if date_info.get("isClosed"):
+        return {
+            "date": preferred_date,
+            "day_name": day_name,
+            "is_open": False,
+            "message": f"❌ Il salone è chiuso il {day_name}",
+            "operators": []
+        }
+
+    await page.click(date_selector, timeout=10000)
+
+    try:
+        await page.wait_for_function(
+            f"() => document.querySelectorAll(\".cella[giorno='{day}'][mese='{month}'][anno='{year}']\").length > 0",
+            timeout=15000
+        )
+    except Exception:
+        await page.click(date_selector, timeout=5000)
+        await page.wait_for_timeout(3000)
+
+    await page.wait_for_timeout(1500)
+    await dismiss_system_modals(page, "after-date")
+
+    # ── GET OPERATOR NAMES FROM REAL HEADER ─────────
+    op_names = await page.evaluate("""
+        () => {
+            const names = {};
+            document.querySelectorAll('.operatori_nomi .operatore[id_operatore]').forEach(op => {
+                const id = op.getAttribute('id_operatore');
+                if (!id || id === '0') return;
+                const nome = op.querySelector('.nome');
+                if (nome) names[id] = nome.textContent.trim();
+            });
+            return names;
+        }
+    """)
+
+    logger.info(f"Operator names found: {op_names}")
+
+    # ── READ GRID + APPOINTMENT OVERLAYS ────────────
+    grid_data = await page.evaluate(f"""
+        () => {{
+            const day = '{day}';
+            const month = '{month}';
+            const year = '{year}';
+
+            const operators = [];
+
+            const toMinutes = (h, m) => parseInt(h, 10) * 60 + parseInt(m, 10);
+
+            const formatTime = (mins) => {{
+                const h = Math.floor(mins / 60).toString().padStart(2, '0');
+                const m = (mins % 60).toString().padStart(2, '0');
+                return `${{h}}:${{m}}`;
+            }};
+
+            const expandQuarterHours = (startH, startM, endH, endM) => {{
+                const out = [];
+                let start = toMinutes(startH, startM);
+                const end = toMinutes(endH, endM);
+
+                start = Math.floor(start / 15) * 15;
+
+                for (let t = start; t < end; t += 15) {{
+                    out.push(formatTime(t));
+                }}
+
+                return out;
+            }};
+
+            // Build occupied slots from appointment overlays
+            const occupiedByOperator = {{}};
+
+            document.querySelectorAll('.appuntamento[id_operatore]').forEach(app => {{
+                const opId = app.getAttribute('id_operatore');
+                if (!opId) return;
+
+                const giorno = app.getAttribute('giorno_inizio');
+                const mese = app.getAttribute('mese_inizio');
+                const anno = app.getAttribute('anno_inizio');
+
+                if (giorno !== String(day) || mese !== String(month).padStart(2, '0') || anno !== String(year)) {{
+                    return;
+                }}
+
+                const h1 = app.getAttribute('ora_inizio');
+                const m1 = app.getAttribute('minuto_inizio');
+                const h2 = app.getAttribute('ora_fine_operatore');
+                const m2 = app.getAttribute('minuto_fine_operatore');
+
+                if (!h1 || !m1 || !h2 || !m2) return;
+
+                const slots = expandQuarterHours(h1, m1, h2, m2);
+
+                if (!occupiedByOperator[opId]) occupiedByOperator[opId] = new Set();
+                slots.forEach(s => occupiedByOperator[opId].add(s));
+            }});
+
+            const columns = document.querySelectorAll('.operatore_orari[id_operatore]');
+
+            for (const col of columns) {{
+                const opId = col.getAttribute('id_operatore');
+                if (opId === '0') continue;
+
+                const isPresent = col.classList.contains('presente');
+
+                const cells = col.querySelectorAll(
+                    ".cella[giorno='" + day + "'][mese='" + month + "'][anno='" + year + "']"
+                );
+
+                const available = [];
+                const occupied = [];
+                const absent = [];
+
+                const bookedSet = occupiedByOperator[opId] || new Set();
+
+                for (const cell of cells) {{
+                    const ora = cell.getAttribute('ora');
+                    const minuto = cell.getAttribute('minuto');
+                    const timeStr = ora.padStart(2, '0') + ':' + minuto.padStart(2, '0');
+
+                    if (cell.classList.contains('assente')) {{
+                        absent.push(timeStr);
+                    }} else if (cell.classList.contains('occupata')) {{
+                        occupied.push(timeStr);
+                    }} else if (bookedSet.has(timeStr)) {{
+                        occupied.push(timeStr);
+                    }} else {{
+                        available.push(timeStr);
+                    }}
+                }}
+
+                operators.push({{
+                    id: opId,
+                    present: isPresent,
+                    available_slots: available,
+                    occupied_slots: occupied,
+                    absent_slots: absent,
+                    total_available: available.length,
+                    total_occupied: occupied.length
+                }});
+            }}
+
+            return operators;
+        }}
+    """)
+
+    all_available = set()
+    operator_list = []
+
+    for op in grid_data:
+        op_id = op["id"]
+        name = op_names.get(op_id, f"Operatore_{op_id}")
+
+        if operator_preference.lower() != "prima disponibile":
+            op_pref = operator_preference.lower().strip()
+            if op_pref not in name.lower().strip():
+                continue
+
+        for slot in op["available_slots"]:
+            all_available.add(slot)
+
+        operator_list.append({
+            "name": name,
+            "id": op_id,
+            "present": op["present"],
+            "available_slots": op["available_slots"],
+            "occupied_slots": op["occupied_slots"],
+            "total_available": op["total_available"],
+            "total_occupied": op["total_occupied"]
+        })
+
+    sorted_times = sorted(all_available)
+
+    hourly = {}
+    for t in sorted_times:
+        h = t.split(":")[0]
+        hourly.setdefault(h, []).append(t)
+
+    present_ops = [op for op in operator_list if op["present"]]
+    total_slots = len(sorted_times)
+
+    if total_slots > 0:
+        first_time = sorted_times[0]
+        last_time = sorted_times[-1]
+        summary = f"✅ {total_slots} slot disponibili con {len(present_ops)} operatori, dalle {first_time} alle {last_time}"
+    else:
+        summary = "❌ Nessuno slot disponibile per questa data"
+
+    return {
+        "date": preferred_date,
+        "day_name": day_name,
+        "is_open": True,
+        "operators": operator_list,
+        "all_available_times": sorted_times,
+        "hourly_summary": hourly,
+        "total_available_slots": total_slots,
+        "total_operators_present": len(present_ops),
+        "summary": summary
+    }
 
 
 @app.on_event("startup")
 async def startup_event():
     load_cache_from_disk()
-    asyncio.create_task(delayed_refresh_start())
-    logger.info("🚀 App started (background refresh delayed)")
+    logger.info("🚀 App started (background refresh disabled)")

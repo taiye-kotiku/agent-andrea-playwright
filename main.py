@@ -1180,31 +1180,80 @@ async def run_live_availability_check(request: AvailabilityRequest) -> dict:
 
                 # ═══════════════════════════════════════════
                 # READ THE GRID
-                # Verified structure:
-                #   .operatore_orari[id_operatore] = operator column
-                #   .cella[ora][minuto] = time slot
-                #   .assente = operator absent at this time
-                #   .occupata = slot already booked
+                # FIXED:
+                # - reads operator columns
+                # - reads appointment overlays (.appuntamento)
+                # - removes booked slots from available_slots
                 # ═══════════════════════════════════════════
                 grid_data = await page.evaluate(f"""
                     () => {{
                         const day = '{day}';
                         const month = '{month}';
                         const year = '{year}';
+
                         const operators = [];
 
-                        // Get operator columns
-                        const columns = document.querySelectorAll(
-                            '.operatore_orari[id_operatore]'
-                        );
+                        const toMinutes = (h, m) => parseInt(h, 10) * 60 + parseInt(m, 10);
+
+                        const formatTime = (mins) => {{
+                            const h = Math.floor(mins / 60).toString().padStart(2, '0');
+                            const m = (mins % 60).toString().padStart(2, '0');
+                            return `${{h}}:${{m}}`;
+                        }};
+
+                        const expandQuarterHours = (startH, startM, endH, endM) => {{
+                            const out = [];
+                            let start = toMinutes(startH, startM);
+                            const end = toMinutes(endH, endM);
+
+                            // Round start down to quarter
+                            start = Math.floor(start / 15) * 15;
+
+                            // Include every 15-min slot that starts before end
+                            for (let t = start; t < end; t += 15) {{
+                                out.push(formatTime(t));
+                            }}
+
+                            return out;
+                        }};
+
+                        // 1. Build occupied slots from appointment overlays
+                        const occupiedByOperator = {{}};
+
+                        document.querySelectorAll('.appuntamento[id_operatore]').forEach(app => {{
+                            const opId = app.getAttribute('id_operatore');
+                            if (!opId) return;
+
+                            const giorno = app.getAttribute('giorno_inizio');
+                            const mese = app.getAttribute('mese_inizio');
+                            const anno = app.getAttribute('anno_inizio');
+
+                            if (giorno !== String(day) || mese !== String(month).padStart(2, '0') || anno !== String(year)) {{
+                                return;
+                            }}
+
+                            const h1 = app.getAttribute('ora_inizio');
+                            const m1 = app.getAttribute('minuto_inizio');
+                            const h2 = app.getAttribute('ora_fine_operatore');
+                            const m2 = app.getAttribute('minuto_fine_operatore');
+
+                            if (!h1 || !m1 || !h2 || !m2) return;
+
+                            const slots = expandQuarterHours(h1, m1, h2, m2);
+
+                            if (!occupiedByOperator[opId]) occupiedByOperator[opId] = new Set();
+                            slots.forEach(s => occupiedByOperator[opId].add(s));
+                        }});
+
+                        // 2. Read operator columns
+                        const columns = document.querySelectorAll('.operatore_orari[id_operatore]');
 
                         for (const col of columns) {{
                             const opId = col.getAttribute('id_operatore');
-                            if (opId === '0') continue; // hidden placeholder
+                            if (opId === '0') continue;
 
                             const isPresent = col.classList.contains('presente');
 
-                            // Get all cells for this date in this column
                             const cells = col.querySelectorAll(
                                 ".cella[giorno='" + day + "'][mese='" + month + "'][anno='" + year + "']"
                             );
@@ -1213,15 +1262,18 @@ async def run_live_availability_check(request: AvailabilityRequest) -> dict:
                             const occupied = [];
                             const absent = [];
 
+                            const bookedSet = occupiedByOperator[opId] || new Set();
+
                             for (const cell of cells) {{
                                 const ora = cell.getAttribute('ora');
                                 const minuto = cell.getAttribute('minuto');
-                                const timeStr = ora.padStart(2, '0') + ':' +
-                                                minuto.padStart(2, '0');
+                                const timeStr = ora.padStart(2, '0') + ':' + minuto.padStart(2, '0');
 
                                 if (cell.classList.contains('assente')) {{
                                     absent.push(timeStr);
                                 }} else if (cell.classList.contains('occupata')) {{
+                                    occupied.push(timeStr);
+                                }} else if (bookedSet.has(timeStr)) {{
                                     occupied.push(timeStr);
                                 }} else {{
                                     available.push(timeStr);
@@ -1242,7 +1294,6 @@ async def run_live_availability_check(request: AvailabilityRequest) -> dict:
                         return operators;
                     }}
                 """)
-
                 # ═══════════════════════════════════════════
                 # GET OPERATOR NAMES
                 # Try to find names from agenda header

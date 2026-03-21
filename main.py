@@ -1247,56 +1247,26 @@ async def run_live_availability_check(request: AvailabilityRequest) -> dict:
                 # GET OPERATOR NAMES
                 # Try to find names from agenda header
                 # ═══════════════════════════════════════════
+                # ═══════════════════════════════════════════
+                # GET OPERATOR NAMES
+                # FIXED: map names ONLY from agenda header row
+                # Verified: .operatori_nomi .operatore[id_operatore] .nome
+                # ═══════════════════════════════════════════
                 op_names = await page.evaluate("""
                     () => {
                         const names = {};
-
-                        // Try: header elements with id_operatore
-                        document.querySelectorAll(
-                            '[id_operatore] .nome, [id_operatore] .nome_operatore'
-                        ).forEach(el => {
-                            const parent = el.closest('[id_operatore]');
-                            if (parent) {
-                                const id = parent.getAttribute('id_operatore');
-                                names[id] = el.textContent.trim();
+                        document.querySelectorAll('.operatori_nomi .operatore[id_operatore]').forEach(op => {
+                            const id = op.getAttribute('id_operatore');
+                            if (!id || id === '0') return;
+                            const nome = op.querySelector('.nome');
+                            if (nome) {
+                                names[id] = nome.textContent.trim();
                             }
                         });
-
-                        // Try: .intestazione_operatore or similar
-                        document.querySelectorAll(
-                            '.operatore_intestazione, .intestazione_operatore, .header_operatore'
-                        ).forEach(el => {
-                            const id = el.getAttribute('id_operatore');
-                            if (id) names[id] = el.textContent.trim();
-                        });
-
-                        // Try: look in the operator header row
-                        document.querySelectorAll(
-                            '.operatori_intestazioni [id_operatore]'
-                        ).forEach(el => {
-                            const id = el.getAttribute('id_operatore');
-                            if (id && id !== '0') {
-                                names[id] = el.textContent.trim().split('\\n')[0].trim();
-                            }
-                        });
-
-                        // Try: any element with matching id_operatore that has a name
-                        if (Object.keys(names).length === 0) {
-                            document.querySelectorAll('.operatore_orari[id_operatore]').forEach(col => {
-                                const id = col.getAttribute('id_operatore');
-                                if (id === '0') return;
-                                // Check previous sibling or header
-                                const header = document.querySelector(
-                                    ".operatore_intestazione[id_operatore='" + id + "'], " +
-                                    "[id_operatore='" + id + "'] .nome"
-                                );
-                                if (header) names[id] = header.textContent.trim();
-                            });
-                        }
-
                         return names;
                     }
                 """)
+
 
                 logger.info(f"Operator names found: {op_names}")
 
@@ -1312,8 +1282,8 @@ async def run_live_availability_check(request: AvailabilityRequest) -> dict:
 
                     # Filter by operator preference if specified
                     if request.operator_preference.lower() != "prima disponibile":
-                        op_pref = js_escape(request.operator_preference.lower())
-                        if op_pref not in name.lower():
+                        op_pref = request.operator_preference.lower().strip()
+                        if op_pref not in name.lower().strip():
                             continue
 
                     for slot in op['available_slots']:

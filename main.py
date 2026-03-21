@@ -1387,8 +1387,13 @@ async def run_live_availability_check(request: AvailabilityRequest) -> dict:
                     "screenshots_url": "https://agent-andrea-playwright-production.up.railway.app/screenshots"
                 }
 
+async def delayed_refresh_start():
+    await asyncio.sleep(120)
+    await refresh_availability_cache_forever()
+
 
 @app.on_event("startup")
 async def startup_event():
     load_cache_from_disk()
-    logger.info("🚀 App started (background refresh temporarily disabled)")
+    asyncio.create_task(delayed_refresh_start())
+    logger.info("🚀 App started (background refresh delayed)")

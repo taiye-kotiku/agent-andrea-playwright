@@ -17,7 +17,8 @@ import json
 import asyncio
 from pathlib import Path
 from datetime import timedelta
-import asyncio
+from dataclasses import dataclass
+from typing import Optional
 
 playwright_lock = asyncio.Lock()
 
@@ -65,6 +66,22 @@ def load_cache_from_disk():
     except Exception as e:
         logger.warning(f"Failed to load cache from disk: {e}")
 
+@dataclass
+class WegestSession:
+    browser = None
+    context = None
+    page = None
+    lock: asyncio.Lock = None
+    logged_in: bool = False
+    agenda_open: bool = False
+    last_used_at: Optional[datetime] = None
+
+    def __post_init__(self):
+        if self.lock is None:
+            self.lock = asyncio.Lock()
+
+wegest_session = WegestSession()
+
 
 def save_cache_to_disk():
     try:
@@ -82,6 +99,155 @@ async def set_cached_day(date_str: str, payload: dict):
         availability_cache["days"][date_str] = payload
         availability_cache["updated_at"] = datetime.utcnow().isoformat()
         save_cache_to_disk()
+
+async def reset_wegest_session():
+    global wegest_session
+    try:
+        if wegest_session.page:
+            await wegest_session.page.close()
+    except Exception:
+        pass
+    try:
+        if wegest_session.context:
+            await wegest_session.context.close()
+    except Exception:
+        pass
+    try:
+        if wegest_session.browser:
+            await wegest_session.browser.close()
+    except Exception:
+        pass
+
+    wegest_session.browser = None
+    wegest_session.context = None
+    wegest_session.page = None
+    wegest_session.logged_in = False
+    wegest_session.agenda_open = False
+    wegest_session.last_used_at = None
+
+    logger.info("♻️ Wegest session reset")
+
+async def is_wegest_session_alive() -> bool:
+    try:
+        if not wegest_session.page:
+            return False
+        if wegest_session.page.is_closed():
+            return False
+
+        login_visible = await wegest_session.page.evaluate("""() => {
+            const el = document.getElementById('pannello_login');
+            return el ? getComputedStyle(el).display !== 'none' : false;
+        }""")
+
+        return not login_visible
+    except Exception:
+        return False
+
+async def ensure_wegest_browser():
+    if wegest_session.page and not wegest_session.page.is_closed():
+        return
+
+    await reset_wegest_session()
+
+    p = await async_playwright().start()
+    browser = await p.chromium.launch(
+        headless=True,
+        args=["--no-sandbox", "--disable-setuid-sandbox", "--disable-dev-shm-usage", "--disable-gpu"]
+    )
+    context = await browser.new_context(
+        viewport={"width": 1280, "height": 900},
+        user_agent="Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 Chrome/120.0.0.0 Safari/537.36"
+    )
+    page = await context.new_page()
+
+    wegest_session.browser = browser
+    wegest_session.context = context
+    wegest_session.page = page
+    wegest_session.logged_in = False
+    wegest_session.agenda_open = False
+    wegest_session.last_used_at = datetime.utcnow()
+
+    logger.info("🌐 Wegest browser session created")
+
+async def ensure_wegest_logged_in():
+    WEGEST_USER = os.environ.get("WEGEST_USERNAME", "")
+    WEGEST_PASSWORD = os.environ.get("WEGEST_PASSWORD", "")
+    LOGIN_URL = "https://www.i-salon.eu/login/default.asp?login=&"
+
+    await ensure_wegest_browser()
+
+    if await is_wegest_session_alive():
+        wegest_session.logged_in = True
+        wegest_session.last_used_at = datetime.utcnow()
+        logger.info("✅ Reusing existing logged-in session")
+        return
+
+    page = wegest_session.page
+
+    logger.info("🔐 Logging into Wegest session...")
+    await page.goto(LOGIN_URL, wait_until="networkidle", timeout=60000)
+    await page.wait_for_timeout(5000)
+
+    await page.fill("input[name='username']", WEGEST_USER)
+    await page.fill("input[name='password']", WEGEST_PASSWORD)
+    await page.evaluate("document.querySelector('input[name=\"codice\"]').value = '1'")
+
+    await page.click("div.button")
+
+    try:
+        await page.wait_for_function(
+            """() => {
+                const lp = document.getElementById('pannello_login');
+                return lp && getComputedStyle(lp).display === 'none';
+            }""",
+            timeout=60000
+        )
+    except Exception:
+        pass
+
+    await page.wait_for_timeout(30000)
+
+    login_visible = await page.evaluate("""() => {
+        const el = document.getElementById('pannello_login');
+        return el ? getComputedStyle(el).display !== 'none' : false;
+    }""")
+
+    if login_visible:
+        raise Exception("Login failed — panel still visible")
+
+    wegest_session.logged_in = True
+    wegest_session.agenda_open = False
+    wegest_session.last_used_at = datetime.utcnow()
+
+    logger.info("🎉 Wegest session login successful")
+
+    await dismiss_system_modals(page, "post-login")
+    await page.wait_for_timeout(2000)
+
+async def ensure_wegest_agenda_open():
+    await ensure_wegest_logged_in()
+
+    page = wegest_session.page
+
+    agenda_visible = await page.evaluate("""() => {
+        const a = document.getElementById('pannello_agenda');
+        return a ? getComputedStyle(a).display !== 'none' : false;
+    }""")
+
+    if agenda_visible:
+        wegest_session.agenda_open = True
+        wegest_session.last_used_at = datetime.utcnow()
+        logger.info("📅 Agenda already open")
+        return
+
+    logger.info("📅 Opening agenda in existing session...")
+    await page.click("[pannello='pannello_agenda']")
+    await page.wait_for_timeout(5000)
+    await dismiss_system_modals(page, "after-agenda")
+    await page.wait_for_timeout(2000)
+
+    wegest_session.agenda_open = True
+    wegest_session.last_used_at = datetime.utcnow()
 
 
 async def get_cached_day(date_str: str):
@@ -1018,6 +1184,21 @@ async def refresh_availability_cache_forever():
             logger.error(f"Background refresh loop error: {e}")
             await asyncio.sleep(300)
 
+@app.post("/invalidate-cache")
+async def invalidate_cache(request: Request):
+    auth = request.headers.get("Authorization") or request.headers.get("authorization") or ""
+    if auth != f"Bearer {API_SECRET}":
+        raise HTTPException(status_code=401, detail="Unauthorized")
+
+    body = await request.json()
+    date_str = body.get("preferred_date")
+    if not date_str:
+        raise HTTPException(status_code=400, detail="preferred_date required")
+
+    await invalidate_cached_day(date_str)
+    return {"ok": True, "invalidated": date_str}
+
+    
 async def run_availability_check(request: AvailabilityRequest) -> dict:
     cached = await get_cached_day(request.preferred_date)
 
@@ -1063,97 +1244,42 @@ async def run_availability_check(request: AvailabilityRequest) -> dict:
     }
 
 async def run_live_availability_check(request: AvailabilityRequest) -> dict:
-    async with playwright_lock:
-        WEGEST_USER = os.environ.get("WEGEST_USERNAME", "")
-        WEGEST_PASSWORD = os.environ.get("WEGEST_PASSWORD", "")
-        LOGIN_URL = "https://www.i-salon.eu/login/default.asp?login=&"
+    async with wegest_session.lock:
+        try:
+            await ensure_wegest_agenda_open()
+            page = wegest_session.page
 
-        async with async_playwright() as p:
-            browser = await p.chromium.launch(
-                headless=True,
-                args=["--no-sandbox", "--disable-setuid-sandbox", "--disable-dev-shm-usage", "--disable-gpu"]
+            result = await scrape_day_availability_from_page(
+                page,
+                request.preferred_date,
+                request.operator_preference
             )
-            context = await browser.new_context(
-                viewport={"width": 1280, "height": 900},
-                user_agent="Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 Chrome/120.0.0.0 Safari/537.36"
-            )
-            page = await context.new_page()
 
+            wegest_session.last_used_at = datetime.utcnow()
+            return result
+
+        except Exception as e:
+            logger.error(f"❌ Availability error: {e}")
             try:
-                # ═══════════════════════════════════════════
-                # LOGIN
-                # ═══════════════════════════════════════════
-                await page.goto(LOGIN_URL, wait_until="networkidle", timeout=60000)
-                await page.wait_for_timeout(5000)
+                await snap(wegest_session.page, "avail_ERROR", force=True)
+            except Exception:
+                pass
 
-                await page.fill("input[name='username']", WEGEST_USER)
-                await page.fill("input[name='password']", WEGEST_PASSWORD)
-                await page.evaluate("document.querySelector('input[name=\"codice\"]').value = '1'")
+            # If session is broken, reset it so next request can recover cleanly
+            try:
+                await reset_wegest_session()
+            except Exception:
+                pass
 
-                await page.click("div.button")
-
-                try:
-                    await page.wait_for_function(
-                        """() => {
-                            const lp = document.getElementById('pannello_login');
-                            return lp && getComputedStyle(lp).display === 'none';
-                        }""",
-                        timeout=60000
-                    )
-                except Exception:
-                    pass
-
-                await page.wait_for_timeout(30000)
-
-                login_visible = await page.evaluate("""() => {
-                    const el = document.getElementById('pannello_login');
-                    return el ? getComputedStyle(el).display !== 'none' : false;
-                }""")
-                if login_visible:
-                    raise Exception("Login failed")
-
-                logger.info("🎉 LOGIN OK (availability)")
-
-                await dismiss_system_modals(page, "post-login")
-                await page.wait_for_timeout(2000)
-
-                # ═══════════════════════════════════════════
-                # OPEN AGENDA
-                # ═══════════════════════════════════════════
-                await page.click("[pannello='pannello_agenda']")
-                await page.wait_for_timeout(5000)
-                await dismiss_system_modals(page, "after-agenda")
-                await page.wait_for_timeout(2000)
-
-                # ═══════════════════════════════════════════
-                # SCRAPE REQUESTED DATE USING SAME SESSION
-                # ═══════════════════════════════════════════
-                result = await scrape_day_availability_from_page(
-                    page,
-                    request.preferred_date,
-                    request.operator_preference
-                )
-
-                await browser.close()
-                return result
-
-            except Exception as e:
-                logger.error(f"❌ Availability error: {e}")
-                await snap(page, "avail_ERROR", force=True)
-                try:
-                    await browser.close()
-                except Exception:
-                    pass
-                return {
-                    "date": request.preferred_date,
-                    "is_open": False,
-                    "error": str(e),
-                    "message": f"❌ Errore: {e}",
-                    "available_slots": [],
-                    "operators": [],
-                    "screenshots_url": "https://agent-andrea-playwright-production.up.railway.app/screenshots"
-                }
-
+            return {
+                "date": request.preferred_date,
+                "is_open": False,
+                "error": str(e),
+                "message": f"❌ Errore: {e}",
+                "available_slots": [],
+                "operators": [],
+                "screenshots_url": "https://agent-andrea-playwright-production.up.railway.app/screenshots"
+            }
                 
 async def delayed_refresh_start():
     await asyncio.sleep(120)
@@ -1398,3 +1524,6 @@ async def scrape_day_availability_from_page(page, preferred_date: str, operator_
 async def startup_event():
     load_cache_from_disk()
     logger.info("🚀 App started (background refresh disabled)")
+
+
+

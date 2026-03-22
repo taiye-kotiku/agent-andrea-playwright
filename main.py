@@ -134,14 +134,28 @@ async def is_wegest_session_alive() -> bool:
         if wegest_session.page.is_closed():
             return False
 
-        login_visible = await wegest_session.page.evaluate("""() => {
-            const el = document.getElementById('pannello_login');
-            return el ? getComputedStyle(el).display !== 'none' : false;
+        state = await wegest_session.page.evaluate("""() => {
+            const loginPanel = document.getElementById('pannello_login');
+            const agendaBtn = document.querySelector("[pannello='pannello_agenda']");
+            const menu = document.getElementById('menu');
+
+            return {
+                loginVisible: loginPanel ? getComputedStyle(loginPanel).display !== 'none' : false,
+                hasAgendaButton: !!agendaBtn,
+                hasMenu: !!menu
+            };
         }""")
 
-        return not login_visible
+        # Session is valid only if login is NOT visible
+        # and the app shell/menu or agenda button exists
+        return (
+            not state.get("loginVisible", False)
+            and (state.get("hasAgendaButton", False) or state.get("hasMenu", False))
+        )
+
     except Exception:
         return False
+
 
 async def ensure_wegest_browser():
     if wegest_session.page and not wegest_session.page.is_closed():
@@ -168,6 +182,7 @@ async def ensure_wegest_browser():
     wegest_session.last_used_at = datetime.utcnow()
 
     logger.info("🌐 Wegest browser session created")
+
 
 async def ensure_wegest_logged_in():
     WEGEST_USER = os.environ.get("WEGEST_USERNAME", "")
@@ -240,6 +255,17 @@ async def ensure_wegest_agenda_open():
         logger.info("📅 Agenda already open")
         return
 
+    # Check that the agenda button actually exists before clicking
+    agenda_button_exists = await page.evaluate("""() => {
+        return !!document.querySelector("[pannello='pannello_agenda']");
+    }""")
+
+    if not agenda_button_exists:
+        logger.warning("Agenda button not found in current session, resetting and logging in again...")
+        await reset_wegest_session()
+        await ensure_wegest_logged_in()
+        page = wegest_session.page
+
     logger.info("📅 Opening agenda in existing session...")
     await page.click("[pannello='pannello_agenda']")
     await page.wait_for_timeout(5000)
@@ -248,7 +274,7 @@ async def ensure_wegest_agenda_open():
 
     wegest_session.agenda_open = True
     wegest_session.last_used_at = datetime.utcnow()
-
+    
 
 async def get_cached_day(date_str: str):
     async with cache_lock:
@@ -1198,7 +1224,7 @@ async def invalidate_cache(request: Request):
     await invalidate_cached_day(date_str)
     return {"ok": True, "invalidated": date_str}
 
-    
+
 async def run_availability_check(request: AvailabilityRequest) -> dict:
     cached = await get_cached_day(request.preferred_date)
 

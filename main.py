@@ -55,6 +55,7 @@ class BookingRequest(BaseModel):
 class AvailabilityRequest(BaseModel):
     preferred_date: str
     operator_preference: str = "prima disponibile"
+    service: str | None = None
     services: list[str] = []
 
 API_SECRET = os.environ.get("API_SECRET", "changeme")

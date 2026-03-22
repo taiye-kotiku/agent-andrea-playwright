@@ -1227,6 +1227,62 @@ async def run_wegest_booking(request: BookingRequest) -> dict:
                 "screenshots_url": "https://agent-andrea-playwright-production.up.railway.app/screenshots"
             }
 
+async def run_availability_check(request: AvailabilityRequest) -> dict:
+    cached = await get_cached_day(request.preferred_date)
+
+    if cached:
+        logger.info(f"⚡ Availability cache HIT for {request.preferred_date}")
+
+        operator_pref = (request.operator_preference or "prima disponibile").lower().strip()
+        requested_services = normalize_requested_services(request.service, request.services)
+
+        # No operator preference: return full cached day
+        if operator_pref == "prima disponibile":
+            return {
+                **cached,
+                "requested_services": requested_services,
+                "source": "cache"
+            }
+
+        # Filter operators for specific preference
+        filtered_ops = []
+        all_times = set()
+        all_valid_times = set()
+
+        for op in cached.get("operators", []):
+            if operator_pref in op.get("name", "").lower():
+                filtered_ops.append(op)
+
+                for t in op.get("available_slots", []):
+                    all_times.add(t)
+
+                for t in op.get("valid_start_times", []):
+                    all_valid_times.add(t)
+
+        response = {
+            **cached,
+            "operators": filtered_ops,
+            "all_available_times": sorted(all_times),
+            "all_valid_start_times": sorted(all_valid_times),
+            "requested_services": requested_services,
+            "source": "cache"
+        }
+
+        return response
+
+    logger.info(f"🐢 Availability cache MISS for {request.preferred_date}")
+    fresh = await run_live_availability_check(request)
+
+    # Cache only if successful/open
+    if fresh and fresh.get("is_open") is True and "operators" in fresh:
+        await set_cached_day(request.preferred_date, fresh)
+
+    return {
+        **fresh,
+        "source": "live"
+    }
+
+
 
 async def refresh_availability_cache_forever():
     await asyncio.sleep(10)  # let app boot first
@@ -1328,45 +1384,7 @@ async def run_live_availability_check(request: AvailabilityRequest) -> dict:
             }
 
 
-            
-async def run_live_availability_check(request: AvailabilityRequest) -> dict:
-    async with wegest_session.lock:
-        try:
-            await ensure_wegest_agenda_open()
-            page = wegest_session.page
-
-            result = await scrape_day_availability_from_page(
-                page,
-                request.preferred_date,
-                request.operator_preference
-            )
-
-            wegest_session.last_used_at = datetime.utcnow()
-            return result
-
-        except Exception as e:
-            logger.error(f"❌ Availability error: {e}")
-            try:
-                await snap(wegest_session.page, "avail_ERROR", force=True)
-            except Exception:
-                pass
-
-            # If session is broken, reset it so next request can recover cleanly
-            try:
-                await reset_wegest_session()
-            except Exception:
-                pass
-
-            return {
-                "date": request.preferred_date,
-                "is_open": False,
-                "error": str(e),
-                "message": f"❌ Errore: {e}",
-                "available_slots": [],
-                "operators": [],
-                "screenshots_url": "https://agent-andrea-playwright-production.up.railway.app/screenshots"
-            }
-                
+               
 async def delayed_refresh_start():
     await asyncio.sleep(120)
     await refresh_availability_cache_forever()

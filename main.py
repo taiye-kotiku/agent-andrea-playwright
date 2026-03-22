@@ -55,6 +55,7 @@ class BookingRequest(BaseModel):
 class AvailabilityRequest(BaseModel):
     preferred_date: str
     operator_preference: str = "prima disponibile"
+    services: list[str] = []
 
 API_SECRET = os.environ.get("API_SECRET", "changeme")
 
@@ -83,6 +84,69 @@ class WegestSession:
 
 wegest_session = WegestSession()
 
+def normalize_requested_services(service: str | None, services: list[str]) -> list[str]:
+    out = [s.strip() for s in (services or []) if s and s.strip()]
+    if not out and service:
+        out = [service.strip()]
+    return out
+
+
+def ceil_to_quarter(minutes: int) -> int:
+    if minutes <= 0:
+        return 0
+    return ((minutes + 14) // 15) * 15
+
+
+def quarter_time_to_minutes(t: str) -> int:
+    h, m = t.split(":")
+    return int(h) * 60 + int(m)
+
+
+def minutes_to_quarter_time(total: int) -> str:
+    h = str(total // 60).zfill(2)
+    m = str(total % 60).zfill(2)
+    return f"{h}:{m}"
+
+
+def compute_valid_start_times(available_slots: list[str], required_operator_minutes: int) -> list[str]:
+    if required_operator_minutes <= 0:
+        return sorted(set(available_slots))
+
+    required_block = ceil_to_quarter(required_operator_minutes)
+    required_steps = required_block // 15
+
+    available_set = set(available_slots)
+    valid = []
+
+    for slot in sorted(available_slots):
+        start = quarter_time_to_minutes(slot)
+        ok = True
+        for i in range(required_steps):
+            t = minutes_to_quarter_time(start + i * 15)
+            if t not in available_set:
+                ok = False
+                break
+        if ok:
+            valid.append(slot)
+
+    return valid
+
+
+async def extract_service_operator_durations_from_page(page) -> dict:
+    durations = await page.evaluate("""
+        () => {
+            const map = {};
+            document.querySelectorAll('.pulsanti_tab .servizio').forEach(s => {
+                const nome = (s.getAttribute('nome') || '').toLowerCase().trim();
+                const tempoOperatore = parseInt(s.getAttribute('tempo_operatore') || '0', 10);
+                if (nome) {
+                    map[nome] = tempoOperatore;
+                }
+            });
+            return map;
+        }
+    """)
+    return durations or {}
 
 def save_cache_to_disk():
     try:
@@ -1224,50 +1288,47 @@ async def invalidate_cache(request: Request):
     return {"ok": True, "invalidated": date_str}
 
 
-async def run_availability_check(request: AvailabilityRequest) -> dict:
-    cached = await get_cached_day(request.preferred_date)
+async def run_live_availability_check(request: AvailabilityRequest) -> dict:
+    async with wegest_session.lock:
+        try:
+            await ensure_wegest_agenda_open()
+            page = wegest_session.page
 
-    if cached:
-        logger.info(f"⚡ Availability cache HIT for {request.preferred_date}")
+            result = await scrape_day_availability_from_page(
+                page,
+                request.preferred_date,
+                request.operator_preference,
+                services=request.services,
+                service=request.service
+            )
 
-        operator_pref = (request.operator_preference or "prima disponibile").lower()
+            wegest_session.last_used_at = datetime.utcnow()
+            return result
 
-        # If no operator preference, return full cached day
-        if operator_pref == "prima disponibile":
+        except Exception as e:
+            logger.error(f"❌ Availability error: {e}")
+            try:
+                await snap(wegest_session.page, "avail_ERROR", force=True)
+            except Exception:
+                pass
+
+            try:
+                await reset_wegest_session()
+            except Exception:
+                pass
+
             return {
-                **cached,
-                "source": "cache"
+                "date": request.preferred_date,
+                "is_open": False,
+                "error": str(e),
+                "message": f"❌ Errore: {e}",
+                "available_slots": [],
+                "operators": [],
+                "screenshots_url": "https://agent-andrea-playwright-production.up.railway.app/screenshots"
             }
 
-        # Filter operators for specific preference
-        filtered_ops = []
-        all_times = set()
 
-        for op in cached.get("operators", []):
-            if operator_pref in op.get("name", "").lower():
-                filtered_ops.append(op)
-                for t in op.get("available_slots", []):
-                    all_times.add(t)
-
-        return {
-            **cached,
-            "operators": filtered_ops,
-            "all_available_times": sorted(all_times),
-            "source": "cache"
-        }
-
-    logger.info(f"🐢 Availability cache MISS for {request.preferred_date}")
-    fresh = await run_live_availability_check(request)
-
-    # Cache only if successful/open
-    if fresh and fresh.get("is_open") is True and "operators" in fresh:
-        await set_cached_day(request.preferred_date, fresh)
-
-    return {
-        **fresh,
-        "source": "live"
-    }
-
+            
 async def run_live_availability_check(request: AvailabilityRequest) -> dict:
     async with wegest_session.lock:
         try:
@@ -1310,12 +1371,43 @@ async def delayed_refresh_start():
     await asyncio.sleep(120)
     await refresh_availability_cache_forever()
 
-async def scrape_day_availability_from_page(page, preferred_date: str, operator_preference: str = "prima disponibile") -> dict:
+async def extract_service_operator_durations_from_page(page) -> dict:
+    """
+    Reads visible service buttons from Wegest and builds:
+    { 'taglio': 25, 'colore': 30, ... }
+    using tempo_operatore from .pulsanti_tab .servizio[nome]
+    """
+    durations = await page.evaluate("""
+        () => {
+            const map = {};
+            document.querySelectorAll('.pulsanti_tab .servizio').forEach(s => {
+                const nome = (s.getAttribute('nome') || '').toLowerCase().trim();
+                const tempoOperatore = parseInt(s.getAttribute('tempo_operatore') || '0', 10);
+                if (nome) {
+                    map[nome] = tempoOperatore;
+                }
+            });
+            return map;
+        }
+    """)
+    return durations or {}
+
+
+async def scrape_day_availability_from_page(
+    page,
+    preferred_date: str,
+    operator_preference: str = "prima disponibile",
+    services: list[str] | None = None,
+    service: str | None = None
+) -> dict:
     target = datetime.strptime(preferred_date, "%Y-%m-%d")
     day, month, year = target.day, target.month, target.year
     day_name = target.strftime("%A")
 
+    requested_services = normalize_requested_services(service, services or [])
+
     logger.info(f"Scraping date in existing session: {day}/{month}/{year} ({day_name})")
+    logger.info(f"Requested services for availability: {requested_services}")
 
     await dismiss_system_modals(page, "before-date")
 
@@ -1366,7 +1458,7 @@ async def scrape_day_availability_from_page(page, preferred_date: str, operator_
     await page.wait_for_timeout(1500)
     await dismiss_system_modals(page, "after-date")
 
-    # ── GET OPERATOR NAMES FROM REAL HEADER ─────────
+    # Operator names from real header
     op_names = await page.evaluate("""
         () => {
             const names = {};
@@ -1382,7 +1474,7 @@ async def scrape_day_availability_from_page(page, preferred_date: str, operator_
 
     logger.info(f"Operator names found: {op_names}")
 
-    # ── READ GRID + APPOINTMENT OVERLAYS ────────────
+    # Read grid + appointment overlays
     grid_data = await page.evaluate(f"""
         () => {{
             const day = '{day}';
@@ -1413,7 +1505,6 @@ async def scrape_day_availability_from_page(page, preferred_date: str, operator_
                 return out;
             }};
 
-            // Build occupied slots from appointment overlays
             const occupiedByOperator = {{}};
 
             document.querySelectorAll('.appuntamento[id_operatore]').forEach(app => {{
@@ -1490,7 +1581,37 @@ async def scrape_day_availability_from_page(page, preferred_date: str, operator_
         }}
     """)
 
+    # Service duration lookup
+    service_durations = await extract_service_operator_durations_from_page(page)
+
+    required_operator_minutes = 0
+    missing_service_durations = []
+
+    for svc in requested_services:
+        svc_l = svc.lower().strip()
+
+        matched_duration = None
+
+        if svc_l in service_durations:
+            matched_duration = service_durations[svc_l]
+        else:
+            for known_name, dur in service_durations.items():
+                if svc_l in known_name or known_name in svc_l:
+                    matched_duration = dur
+                    break
+
+        if matched_duration is None:
+            missing_service_durations.append(svc)
+        else:
+            required_operator_minutes += int(matched_duration)
+
+    logger.info(f"Service operator durations: {service_durations}")
+    logger.info(f"Required operator minutes: {required_operator_minutes}")
+    if missing_service_durations:
+        logger.warning(f"Missing durations for services: {missing_service_durations}")
+
     all_available = set()
+    all_valid_start_times = set()
     operator_list = []
 
     for op in grid_data:
@@ -1502,44 +1623,74 @@ async def scrape_day_availability_from_page(page, preferred_date: str, operator_
             if op_pref not in name.lower().strip():
                 continue
 
-        for slot in op["available_slots"]:
+        raw_slots = op["available_slots"]
+        valid_start_times = compute_valid_start_times(raw_slots, required_operator_minutes)
+
+        for slot in raw_slots:
             all_available.add(slot)
+
+        for slot in valid_start_times:
+            all_valid_start_times.add(slot)
 
         operator_list.append({
             "name": name,
             "id": op_id,
             "present": op["present"],
-            "available_slots": op["available_slots"],
+            "available_slots": raw_slots,
+            "valid_start_times": valid_start_times,
             "occupied_slots": op["occupied_slots"],
             "total_available": op["total_available"],
             "total_occupied": op["total_occupied"]
         })
 
     sorted_times = sorted(all_available)
+    sorted_valid_start_times = sorted(all_valid_start_times)
 
     hourly = {}
     for t in sorted_times:
         h = t.split(":")[0]
         hourly.setdefault(h, []).append(t)
 
+    valid_hourly = {}
+    for t in sorted_valid_start_times:
+        h = t.split(":")[0]
+        valid_hourly.setdefault(h, []).append(t)
+
     present_ops = [op for op in operator_list if op["present"]]
     total_slots = len(sorted_times)
+    total_valid_start_times = len(sorted_valid_start_times)
 
-    if total_slots > 0:
-        first_time = sorted_times[0]
-        last_time = sorted_times[-1]
-        summary = f"✅ {total_slots} slot disponibili con {len(present_ops)} operatori, dalle {first_time} alle {last_time}"
+    if requested_services:
+        if total_valid_start_times > 0:
+            first_time = sorted_valid_start_times[0]
+            last_time = sorted_valid_start_times[-1]
+            summary = (
+                f"✅ {total_valid_start_times} orari di inizio validi per {', '.join(requested_services)} "
+                f"con {len(present_ops)} operatori, dalle {first_time} alle {last_time}"
+            )
+        else:
+            summary = f"❌ Nessun orario di inizio valido per {', '.join(requested_services)} in questa data"
     else:
-        summary = "❌ Nessuno slot disponibile per questa data"
+        if total_slots > 0:
+            first_time = sorted_times[0]
+            last_time = sorted_times[-1]
+            summary = f"✅ {total_slots} slot disponibili con {len(present_ops)} operatori, dalle {first_time} alle {last_time}"
+        else:
+            summary = "❌ Nessuno slot disponibile per questa data"
 
     return {
         "date": preferred_date,
         "day_name": day_name,
         "is_open": True,
+        "requested_services": requested_services,
+        "required_operator_minutes": required_operator_minutes,
         "operators": operator_list,
         "all_available_times": sorted_times,
+        "all_valid_start_times": sorted_valid_start_times,
         "hourly_summary": hourly,
+        "valid_hourly_summary": valid_hourly,
         "total_available_slots": total_slots,
+        "total_valid_start_times": total_valid_start_times,
         "total_operators_present": len(present_ops),
         "summary": summary
     }

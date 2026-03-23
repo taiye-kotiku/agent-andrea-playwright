@@ -59,6 +59,63 @@ class AvailabilityRequest(BaseModel):
     services: list[str] = []
 
 API_SECRET = os.environ.get("API_SECRET", "changeme")
+OPERATOR_CATALOG_FILE = Path("operator_catalog.json")
+SERVICE_CATALOG_FILE = Path("service_catalog.json")
+
+operator_catalog = {
+    "updated_at": None,
+    "operators": {}
+}
+
+service_catalog = {
+    "updated_at": None,
+    "services": {}
+}
+
+
+
+def load_operator_catalog():
+    global operator_catalog
+    try:
+        if OPERATOR_CATALOG_FILE.exists():
+            operator_catalog = json.loads(OPERATOR_CATALOG_FILE.read_text(encoding="utf-8"))
+            logger.info("👥 Operator catalog loaded from disk")
+    except Exception as e:
+        logger.warning(f"Failed to load operator catalog: {e}")
+
+
+def save_operator_catalog():
+    try:
+        OPERATOR_CATALOG_FILE.write_text(
+            json.dumps(operator_catalog, ensure_ascii=False, indent=2),
+            encoding="utf-8"
+        )
+        logger.info("💾 Operator catalog saved")
+    except Exception as e:
+        logger.warning(f"Failed to save operator catalog: {e}")
+
+
+def load_service_catalog():
+    global service_catalog
+    try:
+        if SERVICE_CATALOG_FILE.exists():
+            service_catalog = json.loads(SERVICE_CATALOG_FILE.read_text(encoding="utf-8"))
+            logger.info("🧴 Service catalog loaded from disk")
+    except Exception as e:
+        logger.warning(f"Failed to load service catalog: {e}")
+
+
+def save_service_catalog():
+    try:
+        SERVICE_CATALOG_FILE.write_text(
+            json.dumps(service_catalog, ensure_ascii=False, indent=2),
+            encoding="utf-8"
+        )
+        logger.info("💾 Service catalog saved")
+    except Exception as e:
+        logger.warning(f"Failed to save service catalog: {e}")
+
+
 
 def load_cache_from_disk():
     global availability_cache
@@ -158,6 +215,77 @@ def save_cache_to_disk():
         logger.info("💾 Availability cache saved to disk")
     except Exception as e:
         logger.warning(f"Failed to save cache to disk: {e}")
+
+
+async def update_operator_catalog_from_page(page):
+    global operator_catalog
+
+    try:
+        found = await page.evaluate("""
+            () => {
+                const result = {};
+                document.querySelectorAll('.operatori_nomi .operatore[id_operatore]').forEach(op => {
+                    const id = op.getAttribute('id_operatore');
+                    if (!id || id === '0') return;
+
+                    const nome = op.querySelector('.nome');
+                    if (!nome) return;
+
+                    result[id] = {
+                        name: nome.textContent.trim(),
+                        active: !op.classList.contains('assente')
+                    };
+                });
+                return result;
+            }
+        """)
+
+        if found and isinstance(found, dict):
+            for op_id, info in found.items():
+                operator_catalog["operators"][op_id] = info
+
+            operator_catalog["updated_at"] = datetime.utcnow().isoformat()
+            save_operator_catalog()
+            logger.info(f"👥 Operator catalog updated: {list(found.values())}")
+
+    except Exception as e:
+        logger.warning(f"Failed to update operator catalog from page: {e}")
+
+
+async def update_service_catalog_from_page(page):
+    global service_catalog
+
+    try:
+        found = await page.evaluate("""
+            () => {
+                const result = {};
+                document.querySelectorAll('.pulsanti_tab .servizio[nome]').forEach(s => {
+                    const nome = (s.getAttribute('nome') || '').trim();
+                    if (!nome) return;
+
+                    const key = nome.toLowerCase();
+                    result[key] = {
+                        id: s.id || '',
+                        nome: nome,
+                        tempo_operatore: parseInt(s.getAttribute('tempo_operatore') || '0', 10),
+                        tempo_cliente: parseInt(s.getAttribute('tempo_cliente') || '0', 10)
+                    };
+                });
+                return result;
+            }
+        """)
+
+        if found and isinstance(found, dict):
+            for key, info in found.items():
+                service_catalog["services"][key] = info
+
+            service_catalog["updated_at"] = datetime.utcnow().isoformat()
+            save_service_catalog()
+            logger.info(f"🧴 Service catalog updated: {list(found.keys())[:10]}")
+
+    except Exception as e:
+        logger.warning(f"Failed to update service catalog from page: {e}")
+
 
 
 async def set_cached_day(date_str: str, payload: dict):
@@ -309,7 +437,7 @@ async def ensure_wegest_agenda_open():
     await ensure_wegest_logged_in()
 
     page = wegest_session.page
-
+    await update_operator_catalog_from_page(page)
     agenda_visible = await page.evaluate("""() => {
         const a = document.getElementById('pannello_agenda');
         return a ? getComputedStyle(a).display !== 'none' : false;
@@ -318,6 +446,7 @@ async def ensure_wegest_agenda_open():
     if agenda_visible:
         wegest_session.agenda_open = True
         wegest_session.last_used_at = datetime.utcnow()
+        await update_operator_catalog_from_page(page)
         logger.info("📅 Agenda already open")
         return
 
@@ -937,7 +1066,7 @@ async def run_wegest_booking(request: BookingRequest) -> dict:
             initial_rows = await page.evaluate("""
                 () => document.querySelectorAll('.servizi_selezionati .riga_servizio').length
             """)
-
+            await update_service_catalog_from_page(page)
             selected_services = []
 
             for index, requested_service in enumerate(requested_services, start=1):
@@ -1600,29 +1729,73 @@ async def scrape_day_availability_from_page(
         }}
     """)
 
-    # Service duration lookup
-    service_durations = await extract_service_operator_durations_from_page(page)
+    # ═══════════════════════════════════════════
+    # SERVICE DURATION LOOKUP
+    # Priority:
+    #   1. self-updating service_catalog
+    #   2. live DOM extraction
+    #   3. hardcoded fallback
+    # ═══════════════════════════════════════════
+    live_service_durations = await extract_service_operator_durations_from_page(page)
+
+    logger.info(f"Service catalog durations: {service_catalog.get('services', {})}")
+    logger.info(f"Live scraped service durations: {live_service_durations}")
 
     required_operator_minutes = 0
     missing_service_durations = []
 
     for svc in requested_services:
         svc_l = svc.lower().strip()
-
         matched_duration = None
 
-        if svc_l in service_durations:
-            matched_duration = service_durations[svc_l]
-        else:
-            for known_name, dur in service_durations.items():
-                if svc_l in known_name or known_name in svc_l:
-                    matched_duration = dur
-                    break
+        # 1. exact from service_catalog
+        catalog_services = service_catalog.get("services", {})
+        if svc_l in catalog_services:
+            matched_duration = int(catalog_services[svc_l].get("tempo_operatore", 0) or 0)
 
-        if matched_duration is None:
+        # 2. fuzzy from service_catalog
+        if matched_duration is None or matched_duration == 0:
+            for known_name, info in catalog_services.items():
+                if svc_l in known_name or known_name in svc_l:
+                    matched_duration = int(info.get("tempo_operatore", 0) or 0)
+                    if matched_duration > 0:
+                        break
+
+        # 3. exact from live DOM
+        if matched_duration is None or matched_duration == 0:
+            if svc_l in live_service_durations:
+                matched_duration = int(live_service_durations[svc_l])
+
+        # 4. fuzzy from live DOM
+        if matched_duration is None or matched_duration == 0:
+            for known_name, dur in live_service_durations.items():
+                if svc_l in known_name or known_name in svc_l:
+                    matched_duration = int(dur)
+                    if matched_duration > 0:
+                        break
+
+        # 5. exact fallback map
+        if matched_duration is None or matched_duration == 0:
+            if svc_l in SERVICE_DURATION_FALLBACK:
+                matched_duration = int(SERVICE_DURATION_FALLBACK[svc_l])
+
+        # 6. fuzzy fallback map
+        if matched_duration is None or matched_duration == 0:
+            for known_name, dur in SERVICE_DURATION_FALLBACK.items():
+                if svc_l in known_name or known_name in svc_l:
+                    matched_duration = int(dur)
+                    if matched_duration > 0:
+                        break
+
+        if matched_duration is None or matched_duration == 0:
             missing_service_durations.append(svc)
         else:
             required_operator_minutes += int(matched_duration)
+
+    logger.info(f"Requested services: {requested_services}")
+    logger.info(f"Required operator minutes: {required_operator_minutes}")
+    if missing_service_durations:
+        logger.warning(f"Missing durations for services: {missing_service_durations}")
 
     logger.info(f"Service operator durations: {service_durations}")
     logger.info(f"Required operator minutes: {required_operator_minutes}")
@@ -1714,11 +1887,10 @@ async def scrape_day_availability_from_page(
         "summary": summary
     }
 
-
 @app.on_event("startup")
 async def startup_event():
     load_cache_from_disk()
+    load_operator_catalog()
+    load_service_catalog()
     logger.info("🚀 App started (background refresh disabled)")
-
-
 

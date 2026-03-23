@@ -61,6 +61,35 @@ class AvailabilityRequest(BaseModel):
 API_SECRET = os.environ.get("API_SECRET", "changeme")
 OPERATOR_CATALOG_FILE = Path("operator_catalog.json")
 SERVICE_CATALOG_FILE = Path("service_catalog.json")
+SERVICE_DURATION_FALLBACK = {
+    "colore": 30,
+    "taglio": 25,
+    "piega donna": 35,
+    "filler": 15,
+    "shampoo": 10,
+    "taglio collaboratori": 30,
+    "maschera": 5,
+    "rituale specific": 30,
+    "rigenerazionme": 15,
+    "botox": 15,
+    "booster": 15,
+    "decolorazione": 15,
+    "meches": 45,
+    "shades": 45,
+    "permanente": 30,
+    "sfumature basic": 15,
+    "sfumatura light": 15,
+    "ritocco colore": 15,
+    "acconciatura": 20,
+    "colore ritocchino": 15,
+    "tonalizzante": 15,
+    "smooting": 30,
+    "acconciatura sposa": 20,
+    "manicure": 65,
+    "zero crespo": 15,
+    "ossigenazione": 40
+}
+
 
 operator_catalog = {
     "updated_at": None,

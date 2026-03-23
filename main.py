@@ -1826,7 +1826,7 @@ async def scrape_day_availability_from_page(
     if missing_service_durations:
         logger.warning(f"Missing durations for services: {missing_service_durations}")
 
-    logger.info(f"Service operator durations: {service_durations}")
+    logger.info(f"Service operator durations: {live_service_durations}")
     logger.info(f"Required operator minutes: {required_operator_minutes}")
     if missing_service_durations:
         logger.warning(f"Missing durations for services: {missing_service_durations}")

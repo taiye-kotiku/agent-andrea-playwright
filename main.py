@@ -18,7 +18,8 @@ import asyncio
 from pathlib import Path
 from datetime import timedelta
 from dataclasses import dataclass
-from typing import Optional
+from typing import Optional, Any
+
 
 playwright_lock = asyncio.Lock()
 
@@ -31,6 +32,10 @@ DEBUG_SCREENSHOTS = os.environ.get("DEBUG_SCREENSHOTS", "false").lower() == "tru
 screenshots = {}
 
 CACHE_FILE = Path("availability_cache.json")
+
+call_states: dict[str, dict[str, Any]] = {}
+call_states_lock = asyncio.Lock()
+CALL_STATE_TTL_SECONDS = 60 * 60  # 1 hour
 
 availability_cache = {
     "updated_at": None,
@@ -51,12 +56,17 @@ class BookingRequest(BaseModel):
     operator_preference: str = "prima disponibile"
     preferred_date: str
     preferred_time: str
+    conversation_id: str | None = None
+
 
 class AvailabilityRequest(BaseModel):
     preferred_date: str
     operator_preference: str = "prima disponibile"
     service: str | None = None
     services: list[str] = []
+    conversation_id: str | None = None
+
+
 
 API_SECRET = os.environ.get("API_SECRET", "changeme")
 OPERATOR_CATALOG_FILE = Path("operator_catalog.json")
@@ -315,7 +325,75 @@ async def update_service_catalog_from_page(page):
     except Exception as e:
         logger.warning(f"Failed to update service catalog from page: {e}")
 
+async def get_call_state(conversation_id: str) -> dict[str, Any]:
+    async with call_states_lock:
+        state = call_states.get(conversation_id)
+        if not state:
+            state = {
+                "conversation_id": conversation_id,
+                "services": [],
+                "operator_preference": None,
+                "preferred_date": None,
+                "preferred_time": None,
+                "customer_name": None,
+                "caller_phone": None,
+                "last_availability_result": None,
+                "booking_confirmed": False,
+                "updated_at": datetime.utcnow().isoformat()
+            }
+            call_states[conversation_id] = state
+        return state.copy()
 
+
+async def update_call_state(conversation_id: str, updates: dict[str, Any]) -> dict[str, Any]:
+    async with call_states_lock:
+        state = call_states.get(conversation_id)
+        if not state:
+            state = {
+                "conversation_id": conversation_id,
+                "services": [],
+                "operator_preference": None,
+                "preferred_date": None,
+                "preferred_time": None,
+                "customer_name": None,
+                "caller_phone": None,
+                "last_availability_result": None,
+                "booking_confirmed": False,
+                "updated_at": datetime.utcnow().isoformat()
+            }
+
+        state.update(updates)
+        state["updated_at"] = datetime.utcnow().isoformat()
+        call_states[conversation_id] = state
+        return state.copy()
+
+
+async def clear_call_state(conversation_id: str):
+    async with call_states_lock:
+        if conversation_id in call_states:
+            del call_states[conversation_id]
+            logger.info(f"🧹 Cleared call state for {conversation_id}")
+
+
+async def cleanup_expired_call_states():
+    async with call_states_lock:
+        now = datetime.utcnow()
+        expired = []
+
+        for conversation_id, state in call_states.items():
+            try:
+                updated_at = datetime.fromisoformat(state["updated_at"])
+                age = (now - updated_at).total_seconds()
+                if age > CALL_STATE_TTL_SECONDS:
+                    expired.append(conversation_id)
+            except Exception:
+                expired.append(conversation_id)
+
+        for conversation_id in expired:
+            del call_states[conversation_id]
+
+        if expired:
+            logger.info(f"🧹 Cleaned {len(expired)} expired call states")
 
 async def set_cached_day(date_str: str, payload: dict):
     async with cache_lock:
@@ -591,20 +669,50 @@ async def book_appointment(request: Request, booking: BookingRequest):
     auth = request.headers.get("Authorization") or request.headers.get("authorization") or ""
     if auth != f"Bearer {API_SECRET}":
         raise HTTPException(status_code=401, detail="Unauthorized")
-    screenshots.clear()
-    logger.info(f"📅 Booking: {booking.customer_name} | {booking.service} | {booking.preferred_date} {booking.preferred_time}")
-    return await run_wegest_booking(booking)
 
+    screenshots.clear()
+    logger.info(f"📅 Booking: {booking.customer_name} | {booking.service or booking.services} | {booking.preferred_date} {booking.preferred_time}")
+
+    if booking.conversation_id:
+        await update_call_state(booking.conversation_id, {
+            "customer_name": booking.customer_name,
+            "caller_phone": booking.caller_phone,
+            "preferred_date": booking.preferred_date,
+            "preferred_time": booking.preferred_time,
+            "operator_preference": booking.operator_preference,
+            "services": normalize_requested_services(booking.service, booking.services),
+            "booking_confirmed": True
+        })
+        logger.info(f"🧠 Updated call state from booking for {booking.conversation_id}")
+
+    result = await run_wegest_booking(booking)
+
+    if booking.conversation_id and result.get("success"):
+        await clear_call_state(booking.conversation_id)
+
+    return result
 
 @app.post("/check-availability")
 async def check_availability(request: Request, avail: AvailabilityRequest):
     auth = request.headers.get("Authorization") or request.headers.get("authorization") or ""
     if auth != f"Bearer {API_SECRET}":
         raise HTTPException(status_code=401, detail="Unauthorized")
+
     screenshots.clear()
     logger.info(f"🔍 Availability check: {avail.preferred_date}")
-    return await run_availability_check(avail)
 
+    result = await run_availability_check(avail)
+
+    if avail.conversation_id:
+        await update_call_state(avail.conversation_id, {
+            "preferred_date": avail.preferred_date,
+            "operator_preference": avail.operator_preference,
+            "services": normalize_requested_services(avail.service, avail.services),
+            "last_availability_result": result
+        })
+        logger.info(f"🧠 Updated call state from availability for {avail.conversation_id}")
+
+    return result
 
 async def run_wegest_booking(request: BookingRequest) -> dict:
     async with wegest_session.lock:
@@ -1387,52 +1495,157 @@ async def run_wegest_booking(request: BookingRequest) -> dict:
             }
 
 async def run_availability_check(request: AvailabilityRequest) -> dict:
+    requested_services = normalize_requested_services(request.service, request.services)
+
+    # 1. If live session is active, prefer live over cache
+    if await is_wegest_session_alive():
+        logger.info(f"🟢 Live session available — bypassing cache for {request.preferred_date}")
+        fresh = await run_live_availability_check(request)
+
+        if fresh and fresh.get("is_open") is True and "operators" in fresh:
+            await set_cached_day(request.preferred_date, fresh)
+
+        return {
+            **fresh,
+            "source": "live"
+        }
+
+    # 2. Otherwise use cache if available
     cached = await get_cached_day(request.preferred_date)
 
     if cached:
         logger.info(f"⚡ Availability cache HIT for {request.preferred_date}")
 
         operator_pref = (request.operator_preference or "prima disponibile").lower().strip()
-        requested_services = normalize_requested_services(request.service, request.services)
 
-        # No operator preference: return full cached day
-        if operator_pref == "prima disponibile":
-            return {
-                **cached,
-                "requested_services": requested_services,
-                "source": "cache"
-            }
+        # Compute required duration from service_catalog first, fallback second
+        catalog_services = service_catalog.get("services", {})
+        required_operator_minutes = 0
+        missing_service_durations = []
 
-        # Filter operators for specific preference
+        for svc in requested_services:
+            svc_l = svc.lower().strip()
+            matched_duration = None
+
+            # 1. exact from service catalog
+            if svc_l in catalog_services:
+                matched_duration = int(catalog_services[svc_l].get("tempo_operatore", 0) or 0)
+
+            # 2. fuzzy from service catalog
+            if matched_duration is None or matched_duration == 0:
+                for known_name, info in catalog_services.items():
+                    if svc_l in known_name or known_name in svc_l:
+                        matched_duration = int(info.get("tempo_operatore", 0) or 0)
+                        if matched_duration > 0:
+                            break
+
+            # 3. exact fallback
+            if matched_duration is None or matched_duration == 0:
+                if svc_l in SERVICE_DURATION_FALLBACK:
+                    matched_duration = int(SERVICE_DURATION_FALLBACK[svc_l])
+
+            # 4. fuzzy fallback
+            if matched_duration is None or matched_duration == 0:
+                for known_name, dur in SERVICE_DURATION_FALLBACK.items():
+                    if svc_l in known_name or known_name in svc_l:
+                        matched_duration = int(dur)
+                        if matched_duration > 0:
+                            break
+
+            if matched_duration is None or matched_duration == 0:
+                missing_service_durations.append(svc)
+            else:
+                required_operator_minutes += int(matched_duration)
+
+        logger.info(f"Cache-hit requested services: {requested_services}")
+        logger.info(f"Cache-hit required operator minutes: {required_operator_minutes}")
+        if missing_service_durations:
+            logger.warning(f"Cache-hit missing durations for services: {missing_service_durations}")
+
+        # Filter operators and recompute valid_start_times from cached raw slots
         filtered_ops = []
         all_times = set()
         all_valid_times = set()
 
         for op in cached.get("operators", []):
-            if operator_pref in op.get("name", "").lower():
-                filtered_ops.append(op)
+            name = op.get("name", "")
 
-                for t in op.get("available_slots", []):
-                    all_times.add(t)
+            if operator_pref != "prima disponibile":
+                if operator_pref not in name.lower().strip():
+                    continue
 
-                for t in op.get("valid_start_times", []):
-                    all_valid_times.add(t)
+            raw_slots = op.get("available_slots", [])
+            valid_start_times = compute_valid_start_times(raw_slots, required_operator_minutes)
 
-        response = {
+            for t in raw_slots:
+                all_times.add(t)
+
+            for t in valid_start_times:
+                all_valid_times.add(t)
+
+            filtered_ops.append({
+                **op,
+                "valid_start_times": valid_start_times
+            })
+
+        sorted_times = sorted(all_times)
+        sorted_valid_times = sorted(all_valid_times)
+
+        hourly = {}
+        for t in sorted_times:
+            h = t.split(":")[0]
+            hourly.setdefault(h, []).append(t)
+
+        valid_hourly = {}
+        for t in sorted_valid_times:
+            h = t.split(":")[0]
+            valid_hourly.setdefault(h, []).append(t)
+
+        present_ops = [op for op in filtered_ops if op.get("present")]
+        total_slots = len(sorted_times)
+        total_valid_start_times = len(sorted_valid_times)
+
+        if requested_services:
+            if total_valid_start_times > 0:
+                first_time = sorted_valid_times[0]
+                last_time = sorted_valid_times[-1]
+                summary = (
+                    f"✅ {total_valid_start_times} orari di inizio validi per {', '.join(requested_services)} "
+                    f"con {len(present_ops)} operatori, dalle {first_time} alle {last_time}"
+                )
+            else:
+                summary = f"❌ Nessun orario di inizio valido per {', '.join(requested_services)} in questa data"
+        else:
+            if total_slots > 0:
+                first_time = sorted_times[0]
+                last_time = sorted_times[-1]
+                summary = (
+                    f"✅ {total_slots} slot disponibili con {len(present_ops)} operatori, "
+                    f"dalle {first_time} alle {last_time}"
+                )
+            else:
+                summary = "❌ Nessuno slot disponibile per questa data"
+
+        return {
             **cached,
-            "operators": filtered_ops,
-            "all_available_times": sorted(all_times),
-            "all_valid_start_times": sorted(all_valid_times),
             "requested_services": requested_services,
+            "required_operator_minutes": required_operator_minutes,
+            "operators": filtered_ops,
+            "all_available_times": sorted_times,
+            "all_valid_start_times": sorted_valid_times,
+            "hourly_summary": hourly,
+            "valid_hourly_summary": valid_hourly,
+            "total_available_slots": total_slots,
+            "total_valid_start_times": total_valid_start_times,
+            "total_operators_present": len(present_ops),
+            "summary": summary,
             "source": "cache"
         }
 
-        return response
-
+    # 3. No session and no cache -> live fetch
     logger.info(f"🐢 Availability cache MISS for {request.preferred_date}")
     fresh = await run_live_availability_check(request)
 
-    # Cache only if successful/open
     if fresh and fresh.get("is_open") is True and "operators" in fresh:
         await set_cached_day(request.preferred_date, fresh)
 
@@ -1440,7 +1653,6 @@ async def run_availability_check(request: AvailabilityRequest) -> dict:
         **fresh,
         "source": "live"
     }
-
 
 
 async def refresh_availability_cache_forever():
@@ -1916,10 +2128,20 @@ async def scrape_day_availability_from_page(
         "summary": summary
     }
 
+
+async def cleanup_call_states_forever():
+    while True:
+        try:
+            await cleanup_expired_call_states()
+        except Exception as e:
+            logger.warning(f"Call state cleanup failed: {e}")
+        await asyncio.sleep(300)  # every 5 minutes
+
 @app.on_event("startup")
 async def startup_event():
     load_cache_from_disk()
     load_operator_catalog()
     load_service_catalog()
+    asyncio.create_task(cleanup_call_states_forever())
     logger.info("🚀 App started (background refresh disabled)")
 

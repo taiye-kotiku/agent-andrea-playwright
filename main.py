@@ -36,10 +36,23 @@ CACHE_FILE = Path("availability_cache.json")
 call_states: dict[str, dict[str, Any]] = {}
 call_states_lock = asyncio.Lock()
 CALL_STATE_TTL_SECONDS = 60 * 60  # 1 hour
-wegest_sessions: dict[str, WegestSession] = {}
-wegest_sessions_lock = asyncio.Lock()
-MAX_CONCURRENT_SESSIONS = 3
-SESSION_IDLE_TTL_SECONDS = 60 * 15  # 15 minutes
+
+
+@dataclass
+class WegestSession:
+    playwright: Any = None
+    browser: Any = None
+    context: Any = None
+    page: Any = None
+    lock: asyncio.Lock = None
+    logged_in: bool = False
+    agenda_open: bool = False
+    last_used_at: Optional[datetime] = None
+
+    def __post_init__(self):
+        if self.lock is None:
+            self.lock = asyncio.Lock()
+
 
 availability_cache = {
     "updated_at": None,
@@ -48,9 +61,13 @@ availability_cache = {
 
 cache_lock = asyncio.Lock()
 
+wegest_sessions: dict[str, WegestSession] = {}
+wegest_sessions_lock = asyncio.Lock()
+MAX_CONCURRENT_SESSIONS = 3
+SESSION_IDLE_TTL_SECONDS = 60 * 15  # 15 minutes
+
 def js_escape(s: str) -> str:
     return s.replace("\\", "\\\\").replace("'", "\\'").replace('"', '\\"').replace("\n", "\\n")
-
 
 class BookingRequest(BaseModel):
     customer_name: str
@@ -208,23 +225,6 @@ def load_cache_from_disk():
             logger.info("📦 Availability cache loaded from disk")
     except Exception as e:
         logger.warning(f"Failed to load cache from disk: {e}")
-
-
-@dataclass
-class WegestSession:
-    playwright: Any = None
-    browser: Any = None
-    context: Any = None
-    page: Any = None
-    lock: asyncio.Lock = None
-    logged_in: bool = False
-    agenda_open: bool = False
-    last_used_at: Optional[datetime] = None
-
-    def __post_init__(self):
-        if self.lock is None:
-            self.lock = asyncio.Lock()
-
 
 def normalize_requested_services(service: str | None, services: list[str]) -> list[str]:
     out = [s.strip() for s in (services or []) if s and s.strip()]

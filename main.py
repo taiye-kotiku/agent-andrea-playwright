@@ -36,6 +36,10 @@ CACHE_FILE = Path("availability_cache.json")
 call_states: dict[str, dict[str, Any]] = {}
 call_states_lock = asyncio.Lock()
 CALL_STATE_TTL_SECONDS = 60 * 60  # 1 hour
+wegest_sessions: dict[str, WegestSession] = {}
+wegest_sessions_lock = asyncio.Lock()
+MAX_CONCURRENT_SESSIONS = 3
+SESSION_IDLE_TTL_SECONDS = 60 * 15  # 15 minutes
 
 availability_cache = {
     "updated_at": None,
@@ -120,10 +124,7 @@ SERVICE_DURATION_FALLBACK = {
     "ossigenazione": 40
 }
 
-wegest_sessions: dict[str, WegestSession] = {}
-wegest_sessions_lock = asyncio.Lock()
-MAX_CONCURRENT_SESSIONS = 3
-SESSION_IDLE_TTL_SECONDS = 60 * 15  # 15 minutes
+
 
 operator_catalog = {
     "updated_at": None,

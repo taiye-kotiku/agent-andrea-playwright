@@ -58,6 +58,21 @@ class BookingRequest(BaseModel):
     preferred_time: str
     conversation_id: str | None = None
 
+class UpdateBookingContextRequest(BaseModel):
+    conversation_id: str
+    services: list[str] = []
+    service: str | None = None
+    operator_preference: str | None = None
+    preferred_date: str | None = None
+    preferred_time: str | None = None
+    customer_name: str | None = None
+    caller_phone: str | None = None
+
+class FinalizeBookingRequest(BaseModel):
+    conversation_id: str
+
+class GetBookingContextRequest(BaseModel):
+    conversation_id: str
 
 class AvailabilityRequest(BaseModel):
     preferred_date: str
@@ -66,6 +81,8 @@ class AvailabilityRequest(BaseModel):
     services: list[str] = []
     conversation_id: str | None = None
 
+class CheckBookingOptionsRequest(BaseModel):
+    conversation_id: str
 
 
 API_SECRET = os.environ.get("API_SECRET", "changeme")
@@ -154,6 +171,30 @@ def save_service_catalog():
     except Exception as e:
         logger.warning(f"Failed to save service catalog: {e}")
 
+
+def get_missing_booking_fields(state: dict[str, Any]) -> list[str]:
+    missing = []
+
+    services = state.get("services") or []
+    if not services:
+        missing.append("services")
+
+    if not state.get("operator_preference"):
+        missing.append("operator_preference")
+
+    if not state.get("preferred_date"):
+        missing.append("preferred_date")
+
+    if not state.get("preferred_time"):
+        missing.append("preferred_time")
+
+    if not state.get("customer_name"):
+        missing.append("customer_name")
+
+    if not state.get("caller_phone"):
+        missing.append("caller_phone")
+
+    return missing
 
 
 def load_cache_from_disk():
@@ -2136,6 +2177,236 @@ async def cleanup_call_states_forever():
         except Exception as e:
             logger.warning(f"Call state cleanup failed: {e}")
         await asyncio.sleep(300)  # every 5 minutes
+
+
+@app.post("/update-booking-context")
+async def update_booking_context_endpoint(request: Request, payload: UpdateBookingContextRequest):
+    auth = request.headers.get("Authorization") or request.headers.get("authorization") or ""
+    if auth != f"Bearer {API_SECRET}":
+        raise HTTPException(status_code=401, detail="Unauthorized")
+
+    normalized_services = normalize_requested_services(payload.service, payload.services)
+
+    updates = {}
+
+    if normalized_services:
+        updates["services"] = normalized_services
+
+    if payload.operator_preference is not None:
+        updates["operator_preference"] = payload.operator_preference
+
+    if payload.preferred_date is not None:
+        updates["preferred_date"] = payload.preferred_date
+
+    if payload.preferred_time is not None:
+        updates["preferred_time"] = payload.preferred_time
+
+    if payload.customer_name is not None:
+        updates["customer_name"] = payload.customer_name
+
+    if payload.caller_phone is not None:
+        updates["caller_phone"] = payload.caller_phone
+
+    state = await update_call_state(payload.conversation_id, updates)
+    missing_fields = get_missing_booking_fields(state)
+
+    next_action = "ask_missing_fields" if missing_fields else "ready_for_availability_or_confirmation"
+
+    return {
+        "success": True,
+        "conversation_id": payload.conversation_id,
+        "booking_context": state,
+        "missing_fields": missing_fields,
+        "next_action": next_action
+    }
+
+@app.post("/get-booking-context")
+async def get_booking_context_endpoint(request: Request, payload: GetBookingContextRequest):
+    auth = request.headers.get("Authorization") or request.headers.get("authorization") or ""
+    if auth != f"Bearer {API_SECRET}":
+        raise HTTPException(status_code=401, detail="Unauthorized")
+
+    state = await get_call_state(payload.conversation_id)
+    missing_fields = get_missing_booking_fields(state)
+
+    if not state.get("preferred_date"):
+        next_action = "ask_date"
+    elif not state.get("preferred_time"):
+        next_action = "check_availability_or_ask_time"
+    elif missing_fields:
+        next_action = "ask_missing_fields"
+    else:
+        next_action = "ready_for_confirmation_or_booking"
+
+    return {
+        "success": True,
+        "conversation_id": payload.conversation_id,
+        "booking_context": state,
+        "missing_fields": missing_fields,
+        "next_action": next_action
+    }
+
+@app.post("/check-booking-options")
+async def check_booking_options_endpoint(request: Request, payload: CheckBookingOptionsRequest):
+    auth = request.headers.get("Authorization") or request.headers.get("authorization") or ""
+    if auth != f"Bearer {API_SECRET}":
+        raise HTTPException(status_code=401, detail="Unauthorized")
+
+    state = await get_call_state(payload.conversation_id)
+
+    services = state.get("services") or []
+    operator_preference = state.get("operator_preference") or "prima disponibile"
+    preferred_date = state.get("preferred_date")
+    preferred_time = state.get("preferred_time")
+
+    if not preferred_date:
+        return {
+            "success": False,
+            "conversation_id": payload.conversation_id,
+            "booking_context": state,
+            "missing_fields": ["preferred_date"],
+            "next_action": "ask_date",
+            "message": "Preferred date is missing"
+        }
+
+    # Build an AvailabilityRequest from stored state
+    avail_request = AvailabilityRequest(
+        preferred_date=preferred_date,
+        operator_preference=operator_preference,
+        services=services,
+        service=None,
+        conversation_id=payload.conversation_id
+    )
+
+    availability_result = await run_availability_check(avail_request)
+
+    # Save latest availability result back to call state
+    updated_state = await update_call_state(payload.conversation_id, {
+        "last_availability_result": availability_result
+    })
+
+    # Decide next action
+    if not availability_result.get("is_open", False):
+        next_action = "choose_day"
+    elif availability_result.get("requested_services"):
+        valid_times = availability_result.get("all_valid_start_times", [])
+        if valid_times:
+            next_action = "choose_time"
+        else:
+            next_action = "choose_operator_or_day"
+    else:
+        available_times = availability_result.get("all_available_times", [])
+        if available_times:
+            next_action = "choose_time"
+        else:
+            next_action = "choose_operator_or_day"
+
+    # Build spoken summary fallback
+    requested_services = availability_result.get("requested_services", [])
+    all_valid_start_times = availability_result.get("all_valid_start_times", [])
+    all_available_times = availability_result.get("all_available_times", [])
+
+    if requested_services:
+        times_for_speech = all_valid_start_times[:3]
+    else:
+        times_for_speech = all_available_times[:3]
+
+    if requested_services:
+        if times_for_speech:
+            spoken_summary_it = (
+                f"Abbiamo disponibilità per {', '.join(requested_services)} "
+                f"il {preferred_date} alle {', '.join(times_for_speech)}. Quale orario preferisci?"
+            )
+            spoken_summary_en = (
+                f"We have availability for {', '.join(requested_services)} "
+                f"on {preferred_date} at {', '.join(times_for_speech)}. Which time would you prefer?"
+            )
+        else:
+            spoken_summary_it = (
+                f"Non abbiamo disponibilità per {', '.join(requested_services)} "
+                f"in quella data. Vuoi provare un altro giorno o un altro operatore?"
+            )
+            spoken_summary_en = (
+                f"We don't have availability for {', '.join(requested_services)} "
+                f"on that date. Would you like to try another day or another operator?"
+            )
+    else:
+        if times_for_speech:
+            spoken_summary_it = (
+                f"Abbiamo disponibilità il {preferred_date} alle {', '.join(times_for_speech)}. "
+                f"Quale orario preferisci?"
+            )
+            spoken_summary_en = (
+                f"We have availability on {preferred_date} at {', '.join(times_for_speech)}. "
+                f"Which time would you prefer?"
+            )
+        else:
+            spoken_summary_it = (
+                f"Non abbiamo disponibilità in quella data. Vuoi provare un altro giorno o un altro operatore?"
+            )
+            spoken_summary_en = (
+                f"We don't have availability on that date. Would you like to try another day or another operator?"
+            )
+
+    return {
+        "success": True,
+        "conversation_id": payload.conversation_id,
+        "booking_context": updated_state,
+        "availability": availability_result,
+        "spoken_summary_it": spoken_summary_it,
+        "spoken_summary_en": spoken_summary_en,
+        "next_action": next_action
+    }
+
+@app.post("/finalize-booking")
+async def finalize_booking_endpoint(request: Request, payload: FinalizeBookingRequest):
+    auth = request.headers.get("Authorization") or request.headers.get("authorization") or ""
+    if auth != f"Bearer {API_SECRET}":
+        raise HTTPException(status_code=401, detail="Unauthorized")
+
+    state = await get_call_state(payload.conversation_id)
+    missing_fields = get_missing_booking_fields(state)
+
+    if missing_fields:
+        return {
+            "success": False,
+            "conversation_id": payload.conversation_id,
+            "booking_context": state,
+            "missing_fields": missing_fields,
+            "next_action": "ask_missing_fields",
+            "message": "Cannot finalize booking because required fields are missing"
+        }
+
+    booking_request = BookingRequest(
+        customer_name=state["customer_name"],
+        caller_phone=state["caller_phone"],
+        service=None,
+        services=state.get("services") or [],
+        operator_preference=state.get("operator_preference") or "prima disponibile",
+        preferred_date=state["preferred_date"],
+        preferred_time=state["preferred_time"],
+        conversation_id=payload.conversation_id
+    )
+
+    result = await run_wegest_booking(booking_request)
+
+    if result.get("success"):
+        await clear_call_state(payload.conversation_id)
+        return {
+            "success": True,
+            "conversation_id": payload.conversation_id,
+            "message": "Appointment booked successfully",
+            "booking_result": result,
+            "next_action": "booking_complete"
+        }
+
+    return {
+        "success": False,
+        "conversation_id": payload.conversation_id,
+        "message": result.get("message", "Booking failed"),
+        "booking_result": result,
+        "next_action": "retry_or_apologize"
+    }
 
 @app.on_event("startup")
 async def startup_event():

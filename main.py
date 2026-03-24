@@ -84,6 +84,9 @@ class AvailabilityRequest(BaseModel):
 class CheckBookingOptionsRequest(BaseModel):
     conversation_id: str
 
+class PrepareLiveSessionRequest(BaseModel):
+    conversation_id: str | None = None
+
 
 API_SECRET = os.environ.get("API_SECRET", "changeme")
 OPERATOR_CATALOG_FILE = Path("operator_catalog.json")
@@ -2407,6 +2410,44 @@ async def finalize_booking_endpoint(request: Request, payload: FinalizeBookingRe
         "booking_result": result,
         "next_action": "retry_or_apologize"
     }
+
+@app.post("/prepare-live-session")
+async def prepare_live_session_endpoint(request: Request, payload: PrepareLiveSessionRequest):
+    auth = request.headers.get("Authorization") or request.headers.get("authorization") or ""
+    if auth != f"Bearer {API_SECRET}":
+        raise HTTPException(status_code=401, detail="Unauthorized")
+
+    async with wegest_session.lock:
+        try:
+            await ensure_wegest_agenda_open()
+            wegest_session.last_used_at = datetime.utcnow()
+
+            if payload.conversation_id:
+                await update_call_state(payload.conversation_id, {
+                    "session_prepared": True
+                })
+
+            return {
+                "success": True,
+                "conversation_id": payload.conversation_id,
+                "session_ready": True,
+                "message": "Live Wegest session is ready"
+            }
+
+        except Exception as e:
+            logger.error(f"❌ Session warm-up failed: {e}")
+
+            try:
+                await reset_wegest_session()
+            except Exception:
+                pass
+
+            return {
+                "success": False,
+                "conversation_id": payload.conversation_id,
+                "session_ready": False,
+                "message": f"Session warm-up failed: {e}"
+            }
 
 @app.on_event("startup")
 async def startup_event():

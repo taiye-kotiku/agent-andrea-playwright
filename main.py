@@ -1675,6 +1675,15 @@ async def run_availability_check(request: AvailabilityRequest) -> dict:
             "requested_services": requested_services,
             "required_operator_minutes": required_operator_minutes,
             "operators": filtered_ops,
+            "active_operators": [
+            {
+                "name": op["name"],
+                "id": op["id"],
+                "present": op["present"]
+            }
+            for op in operator_list
+            if op.get("present")
+        ],
             "all_available_times": sorted_times,
             "all_valid_start_times": sorted_valid_times,
             "hourly_summary": hourly,
@@ -2162,6 +2171,15 @@ async def scrape_day_availability_from_page(
         "requested_services": requested_services,
         "required_operator_minutes": required_operator_minutes,
         "operators": operator_list,
+                "active_operators": [
+            {
+                "name": op["name"],
+                "id": op["id"],
+                "present": op["present"]
+            }
+            for op in operator_list
+            if op.get("present")
+        ],
         "all_available_times": sorted_times,
         "all_valid_start_times": sorted_valid_start_times,
         "hourly_summary": hourly,

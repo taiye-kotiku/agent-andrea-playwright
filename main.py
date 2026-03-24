@@ -120,6 +120,10 @@ SERVICE_DURATION_FALLBACK = {
     "ossigenazione": 40
 }
 
+wegest_sessions: dict[str, WegestSession] = {}
+wegest_sessions_lock = asyncio.Lock()
+MAX_CONCURRENT_SESSIONS = 3
+SESSION_IDLE_TTL_SECONDS = 60 * 15  # 15 minutes
 
 operator_catalog = {
     "updated_at": None,
@@ -142,7 +146,6 @@ def load_operator_catalog():
     except Exception as e:
         logger.warning(f"Failed to load operator catalog: {e}")
 
-
 def save_operator_catalog():
     try:
         OPERATOR_CATALOG_FILE.write_text(
@@ -153,7 +156,6 @@ def save_operator_catalog():
     except Exception as e:
         logger.warning(f"Failed to save operator catalog: {e}")
 
-
 def load_service_catalog():
     global service_catalog
     try:
@@ -162,7 +164,6 @@ def load_service_catalog():
             logger.info("🧴 Service catalog loaded from disk")
     except Exception as e:
         logger.warning(f"Failed to load service catalog: {e}")
-
 
 def save_service_catalog():
     try:
@@ -173,7 +174,6 @@ def save_service_catalog():
         logger.info("💾 Service catalog saved")
     except Exception as e:
         logger.warning(f"Failed to save service catalog: {e}")
-
 
 def get_missing_booking_fields(state: dict[str, Any]) -> list[str]:
     missing = []
@@ -199,7 +199,6 @@ def get_missing_booking_fields(state: dict[str, Any]) -> list[str]:
 
     return missing
 
-
 def load_cache_from_disk():
     global availability_cache
     try:
@@ -209,11 +208,13 @@ def load_cache_from_disk():
     except Exception as e:
         logger.warning(f"Failed to load cache from disk: {e}")
 
+
 @dataclass
 class WegestSession:
-    browser = None
-    context = None
-    page = None
+    playwright: Any = None
+    browser: Any = None
+    context: Any = None
+    page: Any = None
     lock: asyncio.Lock = None
     logged_in: bool = False
     agenda_open: bool = False
@@ -223,7 +224,6 @@ class WegestSession:
         if self.lock is None:
             self.lock = asyncio.Lock()
 
-wegest_session = WegestSession()
 
 def normalize_requested_services(service: str | None, services: list[str]) -> list[str]:
     out = [s.strip() for s in (services or []) if s and s.strip()]
@@ -231,23 +231,19 @@ def normalize_requested_services(service: str | None, services: list[str]) -> li
         out = [service.strip()]
     return out
 
-
 def ceil_to_quarter(minutes: int) -> int:
     if minutes <= 0:
         return 0
     return ((minutes + 14) // 15) * 15
 
-
 def quarter_time_to_minutes(t: str) -> int:
     h, m = t.split(":")
     return int(h) * 60 + int(m)
-
 
 def minutes_to_quarter_time(total: int) -> str:
     h = str(total // 60).zfill(2)
     m = str(total % 60).zfill(2)
     return f"{h}:{m}"
-
 
 def compute_valid_start_times(available_slots: list[str], required_operator_minutes: int) -> list[str]:
     if required_operator_minutes <= 0:
@@ -271,7 +267,6 @@ def compute_valid_start_times(available_slots: list[str], required_operator_minu
             valid.append(slot)
 
     return valid
-
 
 async def extract_service_operator_durations_from_page(page) -> dict:
     durations = await page.evaluate("""
@@ -298,7 +293,6 @@ def save_cache_to_disk():
         logger.info("💾 Availability cache saved to disk")
     except Exception as e:
         logger.warning(f"Failed to save cache to disk: {e}")
-
 
 async def update_operator_catalog_from_page(page):
     global operator_catalog
@@ -333,7 +327,6 @@ async def update_operator_catalog_from_page(page):
 
     except Exception as e:
         logger.warning(f"Failed to update operator catalog from page: {e}")
-
 
 async def update_service_catalog_from_page(page):
     global service_catalog
@@ -388,7 +381,6 @@ async def get_call_state(conversation_id: str) -> dict[str, Any]:
             call_states[conversation_id] = state
         return state.copy()
 
-
 async def update_call_state(conversation_id: str, updates: dict[str, Any]) -> dict[str, Any]:
     async with call_states_lock:
         state = call_states.get(conversation_id)
@@ -411,13 +403,58 @@ async def update_call_state(conversation_id: str, updates: dict[str, Any]) -> di
         call_states[conversation_id] = state
         return state.copy()
 
-
 async def clear_call_state(conversation_id: str):
     async with call_states_lock:
         if conversation_id in call_states:
             del call_states[conversation_id]
             logger.info(f"🧹 Cleared call state for {conversation_id}")
 
+async def get_or_create_wegest_session(conversation_id: str) -> WegestSession:
+    async with wegest_sessions_lock:
+        session = wegest_sessions.get(conversation_id)
+        if session:
+            return session
+
+        active_count = len(wegest_sessions)
+        if active_count >= MAX_CONCURRENT_SESSIONS:
+            raise Exception(f"Maximum concurrent live sessions reached ({MAX_CONCURRENT_SESSIONS})")
+
+        session = WegestSession()
+        wegest_sessions[conversation_id] = session
+        logger.info(f"🆕 Created Wegest session for {conversation_id}")
+        return session
+
+async def reset_wegest_session(conversation_id: str):
+    async with wegest_sessions_lock:
+        session = wegest_sessions.get(conversation_id)
+        if not session:
+            return
+
+    try:
+        if session.page:
+            await session.page.close()
+    except Exception:
+        pass
+    try:
+        if session.context:
+            await session.context.close()
+    except Exception:
+        pass
+    try:
+        if session.browser:
+            await session.browser.close()
+    except Exception:
+        pass
+    try:
+        if session.playwright:
+            await session.playwright.stop()
+    except Exception:
+        pass
+
+    async with wegest_sessions_lock:
+        wegest_sessions.pop(conversation_id, None)
+
+    logger.info(f"♻️ Wegest session reset for {conversation_id}")
 
 async def cleanup_expired_call_states():
     async with call_states_lock:
@@ -501,12 +538,14 @@ async def is_wegest_session_alive() -> bool:
     except Exception:
         return False
 
+async def ensure_wegest_browser(conversation_id: str):
+    session = await get_or_create_wegest_session(conversation_id)
 
-async def ensure_wegest_browser():
-    if wegest_session.page and not wegest_session.page.is_closed():
-        return
+    if session.page and not session.page.is_closed():
+        return session
 
-    await reset_wegest_session()
+    await reset_wegest_session(conversation_id)
+    session = await get_or_create_wegest_session(conversation_id)
 
     p = await async_playwright().start()
     browser = await p.chromium.launch(
@@ -519,32 +558,33 @@ async def ensure_wegest_browser():
     )
     page = await context.new_page()
 
-    wegest_session.browser = browser
-    wegest_session.context = context
-    wegest_session.page = page
-    wegest_session.logged_in = False
-    wegest_session.agenda_open = False
-    wegest_session.last_used_at = datetime.utcnow()
+    session.playwright = p
+    session.browser = browser
+    session.context = context
+    session.page = page
+    session.logged_in = False
+    session.agenda_open = False
+    session.last_used_at = datetime.utcnow()
 
-    logger.info("🌐 Wegest browser session created")
+    logger.info(f"🌐 Wegest browser session created for {conversation_id}")
+    return session
 
-
-async def ensure_wegest_logged_in():
+async def ensure_wegest_logged_in(conversation_id: str):
     WEGEST_USER = os.environ.get("WEGEST_USERNAME", "")
     WEGEST_PASSWORD = os.environ.get("WEGEST_PASSWORD", "")
     LOGIN_URL = "https://www.i-salon.eu/login/default.asp?login=&"
 
-    await ensure_wegest_browser()
+    session = await ensure_wegest_browser(conversation_id)
 
-    if await is_wegest_session_alive():
-        wegest_session.logged_in = True
-        wegest_session.last_used_at = datetime.utcnow()
-        logger.info("✅ Reusing existing logged-in session")
-        return
+    if await is_wegest_session_alive(conversation_id):
+        session.logged_in = True
+        session.last_used_at = datetime.utcnow()
+        logger.info(f"✅ Reusing existing logged-in session for {conversation_id}")
+        return session
 
-    page = wegest_session.page
+    page = session.page
 
-    logger.info("🔐 Logging into Wegest session...")
+    logger.info(f"🔐 Logging into Wegest session for {conversation_id}...")
     await page.goto(LOGIN_URL, wait_until="networkidle", timeout=60000)
     await page.wait_for_timeout(5000)
 
@@ -575,57 +615,58 @@ async def ensure_wegest_logged_in():
     if login_visible:
         raise Exception("Login failed — panel still visible")
 
-    wegest_session.logged_in = True
-    wegest_session.agenda_open = False
-    wegest_session.last_used_at = datetime.utcnow()
+    session.logged_in = True
+    session.agenda_open = False
+    session.last_used_at = datetime.utcnow()
 
-    logger.info("🎉 Wegest session login successful")
+    logger.info(f"🎉 Wegest session login successful for {conversation_id}")
 
     await dismiss_system_modals(page, "post-login")
     await page.wait_for_timeout(2000)
 
-async def ensure_wegest_agenda_open():
-    await ensure_wegest_logged_in()
+    return session
 
-    page = wegest_session.page
-    await update_operator_catalog_from_page(page)
+async def ensure_wegest_agenda_open(conversation_id: str):
+    session = await ensure_wegest_logged_in(conversation_id)
+    page = session.page
+
     agenda_visible = await page.evaluate("""() => {
         const a = document.getElementById('pannello_agenda');
         return a ? getComputedStyle(a).display !== 'none' : false;
     }""")
 
     if agenda_visible:
-        wegest_session.agenda_open = True
-        wegest_session.last_used_at = datetime.utcnow()
+        session.agenda_open = True
+        session.last_used_at = datetime.utcnow()
+        logger.info(f"📅 Agenda already open for {conversation_id}")
         await update_operator_catalog_from_page(page)
-        logger.info("📅 Agenda already open")
-        return
+        return session
 
-    # Check that the agenda button actually exists before clicking
     agenda_button_exists = await page.evaluate("""() => {
         return !!document.querySelector("[pannello='pannello_agenda']");
     }""")
 
     if not agenda_button_exists:
-        logger.warning("Agenda button not found in current session, resetting and logging in again...")
-        await reset_wegest_session()
-        await ensure_wegest_logged_in()
-        page = wegest_session.page
+        logger.warning(f"Agenda button not found for {conversation_id}, resetting session...")
+        await reset_wegest_session(conversation_id)
+        session = await ensure_wegest_logged_in(conversation_id)
+        page = session.page
 
-    logger.info("📅 Opening agenda in existing session...")
+    logger.info(f"📅 Opening agenda in existing session for {conversation_id}...")
     await page.click("[pannello='pannello_agenda']")
     await page.wait_for_timeout(5000)
     await dismiss_system_modals(page, "after-agenda")
     await page.wait_for_timeout(2000)
 
-    wegest_session.agenda_open = True
-    wegest_session.last_used_at = datetime.utcnow()
+    session.agenda_open = True
+    session.last_used_at = datetime.utcnow()
+    await update_operator_catalog_from_page(page)
 
+    return session
 
 async def get_cached_day(date_str: str):
     async with cache_lock:
         return availability_cache["days"].get(date_str)
-
 
 async def invalidate_cached_day(date_str: str):
     async with cache_lock:
@@ -635,11 +676,9 @@ async def invalidate_cached_day(date_str: str):
             save_cache_to_disk()
             logger.info(f"🗑️ Invalidated cache for {date_str}")
 
-
 @app.get("/health")
 async def health():
     return {"status": "ok", "service": "Agent Andrea Wegest Booking"}
-
 
 @app.get("/screenshots", response_class=HTMLResponse)
 async def view_screenshots():
@@ -653,7 +692,6 @@ async def view_screenshots():
     html += "</body></html>"
     return html
 
-
 async def snap(page, name: str, force: bool = False):
     if not DEBUG_SCREENSHOTS and not force:
         return
@@ -663,7 +701,6 @@ async def snap(page, name: str, force: bool = False):
         logger.info(f"📸 {name}")
     except Exception as e:
         logger.warning(f"Screenshot failed ({name}): {e}")
-
 
 async def dismiss_system_modals(page, label=""):
     logger.info(f"🔍 Modal sweep: {label}")
@@ -706,7 +743,6 @@ async def dismiss_system_modals(page, label=""):
             if (getComputedStyle(el).display !== 'none') el.style.display = 'none';
         })
     """)
-
 
 @app.post("/book")
 async def book_appointment(request: Request, booking: BookingRequest):
@@ -759,13 +795,18 @@ async def check_availability(request: Request, avail: AvailabilityRequest):
     return result
 
 async def run_wegest_booking(request: BookingRequest) -> dict:
-    async with wegest_session.lock:
+    if not request.conversation_id:
+        raise Exception("conversation_id is required for live booking")
+
+    session = await get_or_create_wegest_session(request.conversation_id)
+
+    async with session.lock:
         page = None
 
         try:
-            await ensure_wegest_agenda_open()
-            page = wegest_session.page
-            wegest_session.last_used_at = datetime.utcnow()
+            await ensure_wegest_agenda_open(request.conversation_id)
+            page = session.page
+            session.last_used_at = datetime.utcnow()
 
             screenshots.clear()
             logger.info(f"📅 Booking: {request.customer_name} | {request.service or request.services} | {request.preferred_date} {request.preferred_time}")
@@ -1502,7 +1543,7 @@ async def run_wegest_booking(request: BookingRequest) -> dict:
                     await invalidate_cached_day(request.preferred_date)
 
             await snap(page, "12_final")
-            wegest_session.last_used_at = datetime.utcnow()
+            session.last_used_at = datetime.utcnow()
 
             logger.info(f"🏁 {'✅ SUCCESS' if success else '⚠️ UNCERTAIN'}")
 
@@ -1527,7 +1568,7 @@ async def run_wegest_booking(request: BookingRequest) -> dict:
                 await snap(page, "ERROR", force=True)
 
             try:
-                await reset_wegest_session()
+                await reset_wegest_session(request.conversation_id)
             except Exception:
                 pass
 
@@ -1542,7 +1583,7 @@ async def run_availability_check(request: AvailabilityRequest) -> dict:
     requested_services = normalize_requested_services(request.service, request.services)
 
     # 1. If live session is active, prefer live over cache
-    if await is_wegest_session_alive():
+    if request.conversation_id and await is_wegest_session_alive(request.conversation_id):
         logger.info(f"🟢 Live session available — bypassing cache for {request.preferred_date}")
         fresh = await run_live_availability_check(request)
 
@@ -1769,10 +1810,15 @@ async def invalidate_cache(request: Request):
 
 
 async def run_live_availability_check(request: AvailabilityRequest) -> dict:
-    async with wegest_session.lock:
+    if not request.conversation_id:
+        raise Exception("conversation_id is required for live availability checks")
+
+    session = await get_or_create_wegest_session(request.conversation_id)
+
+    async with session.lock:
         try:
-            await ensure_wegest_agenda_open()
-            page = wegest_session.page
+            await ensure_wegest_agenda_open(request.conversation_id)
+            page = session.page
 
             result = await scrape_day_availability_from_page(
                 page,
@@ -1782,18 +1828,18 @@ async def run_live_availability_check(request: AvailabilityRequest) -> dict:
                 service=request.service
             )
 
-            wegest_session.last_used_at = datetime.utcnow()
+            session.last_used_at = datetime.utcnow()
             return result
 
         except Exception as e:
-            logger.error(f"❌ Availability error: {e}")
+            logger.error(f"❌ Availability error for {request.conversation_id}: {e}")
             try:
-                await snap(wegest_session.page, "avail_ERROR", force=True)
+                await snap(session.page, "avail_ERROR", force=True)
             except Exception:
                 pass
 
             try:
-                await reset_wegest_session()
+                await reset_wegest_session(request.conversation_id)
             except Exception:
                 pass
 
@@ -1807,7 +1853,25 @@ async def run_live_availability_check(request: AvailabilityRequest) -> dict:
                 "screenshots_url": "https://agent-andrea-playwright-production.up.railway.app/screenshots"
             }
 
+async def cleanup_idle_wegest_sessions():
+    now = datetime.utcnow()
+    to_remove = []
 
+    async with wegest_sessions_lock:
+        items = list(wegest_sessions.items())
+
+    for conversation_id, session in items:
+        if not session.last_used_at:
+            continue
+        age = (now - session.last_used_at).total_seconds()
+        if age > SESSION_IDLE_TTL_SECONDS:
+            to_remove.append(conversation_id)
+
+    for conversation_id in to_remove:
+        await reset_wegest_session(conversation_id)
+
+    if to_remove:
+        logger.info(f"🧹 Cleaned {len(to_remove)} idle Wegest sessions")
                
 async def delayed_refresh_start():
     await asyncio.sleep(120)
@@ -1834,6 +1898,13 @@ async def extract_service_operator_durations_from_page(page) -> dict:
     """)
     return durations or {}
 
+async def cleanup_wegest_sessions_forever():
+    while True:
+        try:
+            await cleanup_idle_wegest_sessions()
+        except Exception as e:
+            logger.warning(f"Wegest session cleanup failed: {e}")
+        await asyncio.sleep(300)
 
 async def scrape_day_availability_from_page(
     page,
@@ -2190,7 +2261,6 @@ async def scrape_day_availability_from_page(
         "summary": summary
     }
 
-
 async def cleanup_call_states_forever():
     while True:
         try:
@@ -2435,15 +2505,19 @@ async def prepare_live_session_endpoint(request: Request, payload: PrepareLiveSe
     if auth != f"Bearer {API_SECRET}":
         raise HTTPException(status_code=401, detail="Unauthorized")
 
-    async with wegest_session.lock:
-        try:
-            await ensure_wegest_agenda_open()
-            wegest_session.last_used_at = datetime.utcnow()
+    if not payload.conversation_id:
+        raise HTTPException(status_code=400, detail="conversation_id required")
 
-            if payload.conversation_id:
-                await update_call_state(payload.conversation_id, {
-                    "session_prepared": True
-                })
+    session = await get_or_create_wegest_session(payload.conversation_id)
+
+    async with session.lock:
+        try:
+            await ensure_wegest_agenda_open(payload.conversation_id)
+            session.last_used_at = datetime.utcnow()
+
+            await update_call_state(payload.conversation_id, {
+                "session_prepared": True
+            })
 
             return {
                 "success": True,
@@ -2453,10 +2527,10 @@ async def prepare_live_session_endpoint(request: Request, payload: PrepareLiveSe
             }
 
         except Exception as e:
-            logger.error(f"❌ Session warm-up failed: {e}")
+            logger.error(f"❌ Session warm-up failed for {payload.conversation_id}: {e}")
 
             try:
-                await reset_wegest_session()
+                await reset_wegest_session(payload.conversation_id)
             except Exception:
                 pass
 
@@ -2473,5 +2547,6 @@ async def startup_event():
     load_operator_catalog()
     load_service_catalog()
     asyncio.create_task(cleanup_call_states_forever())
+    asyncio.create_task(cleanup_wegest_sessions_forever())
     logger.info("🚀 App started (background refresh disabled)")
 

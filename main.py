@@ -510,7 +510,7 @@ async def reset_wegest_session():
 
     logger.info("♻️ Wegest session reset")
 
-async def is_wegest_session_alive() -> bool:
+async def is_wegest_session_alive(conversation_id: str) -> bool:
     try:
         if not wegest_session.page:
             return False

@@ -108,6 +108,10 @@ class CheckBookingOptionsRequest(BaseModel):
 class PrepareLiveSessionRequest(BaseModel):
     conversation_id: str | None = None
 
+class ServiceDurationRequest(BaseModel):
+    service: str | None = None
+    services: list[str] = []
+
 
 API_SECRET = os.environ.get("API_SECRET", "changeme")
 OPERATOR_CATALOG_FILE = Path("operator_catalog.json")
@@ -2323,6 +2327,99 @@ async def cleanup_call_states_forever():
         await asyncio.sleep(300)  # every 5 minutes
 
 
+@app.post("/get-service-duration")
+async def get_service_duration_endpoint(request: Request, payload: ServiceDurationRequest):
+    auth = request.headers.get("Authorization") or request.headers.get("authorization") or ""
+    if auth != f"Bearer {API_SECRET}":
+        raise HTTPException(status_code=401, detail="Unauthorized")
+
+    requested_services = normalize_requested_services(payload.service, payload.services)
+
+    if not requested_services:
+        return {
+            "success": False,
+            "message": "No service provided",
+            "services": []
+        }
+
+    catalog_services = service_catalog.get("services", {})
+    results = []
+
+    for svc in requested_services:
+        svc_l = svc.lower().strip()
+        matched = None
+
+        # exact from catalog
+        if svc_l in catalog_services:
+            matched = catalog_services[svc_l]
+
+        # fuzzy from catalog
+        if matched is None:
+            for known_name, info in catalog_services.items():
+                if svc_l in known_name or known_name in svc_l:
+                    matched = info
+                    break
+
+        # fallback if catalog misses
+        if matched is None:
+            fallback_duration = SERVICE_DURATION_FALLBACK.get(svc_l)
+            if fallback_duration:
+                matched = {
+                    "nome": svc,
+                    "tempo_operatore": fallback_duration,
+                    "tempo_cliente": fallback_duration
+                }
+
+        if matched:
+            results.append({
+                "requested_service": svc,
+                "resolved_service": matched.get("nome", svc),
+                "tempo_operatore": matched.get("tempo_operatore", 0),
+                "tempo_cliente": matched.get("tempo_cliente", 0)
+            })
+        else:
+            results.append({
+                "requested_service": svc,
+                "resolved_service": None,
+                "tempo_operatore": None,
+                "tempo_cliente": None
+            })
+
+    # Build spoken summaries
+    if len(results) == 1:
+        r = results[0]
+        if r["tempo_operatore"] is not None:
+            spoken_summary_it = (
+                f"Il servizio {r['resolved_service']} richiede circa "
+                f"{r['tempo_operatore']} minuti di lavoro operatore"
+            )
+            spoken_summary_en = (
+                f"The service {r['resolved_service']} requires about "
+                f"{r['tempo_operatore']} minutes of operator time"
+            )
+        else:
+            spoken_summary_it = f"Non sono riuscita a trovare la durata del servizio {r['requested_service']}"
+            spoken_summary_en = f"I couldn't find the duration for the service {r['requested_service']}"
+    else:
+        known = [r for r in results if r["tempo_operatore"] is not None]
+        total_operator = sum(r["tempo_operatore"] for r in known)
+        service_names = ", ".join(r["resolved_service"] or r["requested_service"] for r in results)
+
+        spoken_summary_it = (
+            f"I servizi {service_names} richiedono circa {total_operator} minuti totali di lavoro operatore"
+        )
+        spoken_summary_en = (
+            f"The services {service_names} require about {total_operator} total minutes of operator time"
+        )
+
+    return {
+        "success": True,
+        "services": results,
+        "spoken_summary_it": spoken_summary_it,
+        "spoken_summary_en": spoken_summary_en
+    }
+
+    
 @app.post("/update-booking-context")
 async def update_booking_context_endpoint(request: Request, payload: UpdateBookingContextRequest):
     auth = request.headers.get("Authorization") or request.headers.get("authorization") or ""

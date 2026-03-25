@@ -483,41 +483,15 @@ async def set_cached_day(date_str: str, payload: dict):
         availability_cache["updated_at"] = datetime.utcnow().isoformat()
         save_cache_to_disk()
 
-async def reset_wegest_session():
-    global wegest_session
-    try:
-        if wegest_session.page:
-            await wegest_session.page.close()
-    except Exception:
-        pass
-    try:
-        if wegest_session.context:
-            await wegest_session.context.close()
-    except Exception:
-        pass
-    try:
-        if wegest_session.browser:
-            await wegest_session.browser.close()
-    except Exception:
-        pass
-
-    wegest_session.browser = None
-    wegest_session.context = None
-    wegest_session.page = None
-    wegest_session.logged_in = False
-    wegest_session.agenda_open = False
-    wegest_session.last_used_at = None
-
-    logger.info("♻️ Wegest session reset")
-
 async def is_wegest_session_alive(conversation_id: str) -> bool:
     try:
-        if not wegest_session.page:
+        session = await get_or_create_wegest_session(conversation_id)
+        if not session.page:
             return False
-        if wegest_session.page.is_closed():
+        if session.page.is_closed():
             return False
 
-        state = await wegest_session.page.evaluate("""() => {
+        state = await session.page.evaluate("""() => {
             const loginPanel = document.getElementById('pannello_login');
             const agendaBtn = document.querySelector("[pannello='pannello_agenda']");
             const menu = document.getElementById('menu');

@@ -183,6 +183,62 @@ def load_service_catalog():
     except Exception as e:
         logger.warning(f"Failed to load service catalog: {e}")
 
+def parse_optional_time_to_minutes(t: str | None) -> int | None:
+    if not t:
+        return None
+    try:
+        h, m = t.split(":")
+        return int(h) * 60 + int(m)
+    except Exception:
+        return None
+
+
+def build_operator_time_suggestions(
+    operators: list[dict[str, Any]],
+    requested_time: str | None
+) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
+    """
+    Returns:
+      - exact operators available at requested time
+      - nearest operator/time alternatives if no exact match
+    """
+    requested_minutes = parse_optional_time_to_minutes(requested_time)
+    if requested_minutes is None:
+        return [], []
+
+    exact_matches = []
+    nearest = []
+
+    for op in operators:
+        valid_times = op.get("valid_start_times") or op.get("available_slots") or []
+        for t in valid_times:
+            mins = quarter_time_to_minutes(t)
+            delta = abs(mins - requested_minutes)
+
+            if mins == requested_minutes:
+                exact_matches.append({
+                    "name": op["name"],
+                    "id": op["id"],
+                    "time": t,
+                    "delta_minutes": 0
+                })
+            else:
+                nearest.append({
+                    "name": op["name"],
+                    "id": op["id"],
+                    "time": t,
+                    "delta_minutes": delta
+                })
+
+    nearest.sort(key=lambda x: (x["delta_minutes"], x["time"], x["name"]))
+
+    # Keep only closest 5 alternatives
+    if exact_matches:
+        return exact_matches, []
+
+    return [], nearest[:5]
+
+
 def save_service_catalog():
     try:
         SERVICE_CATALOG_FILE.write_text(
@@ -2351,6 +2407,19 @@ async def check_booking_options_endpoint(request: Request, payload: CheckBooking
         "last_availability_result": availability_result
     })
 
+    exact_operator_matches = []
+    closest_operator_options = []
+
+    preferred_time = state.get("preferred_time")
+    operator_preference = state.get("operator_preference") or "prima disponibile"
+
+    if preferred_time and operator_preference.lower() == "prima disponibile":
+        exact_operator_matches, closest_operator_options = build_operator_time_suggestions(
+            availability_result.get("operators", []),
+            preferred_time
+        )
+
+
     # Decide next action
     if not availability_result.get("is_open", False):
         next_action = "choose_day"
@@ -2377,48 +2446,86 @@ async def check_booking_options_endpoint(request: Request, payload: CheckBooking
     else:
         times_for_speech = all_available_times[:3]
 
-    if requested_services:
-        if times_for_speech:
+    # Special case: requested time + first available operator
+    if preferred_time and operator_preference.lower() == "prima disponibile":
+        if exact_operator_matches:
+            names = ", ".join([m["name"] for m in exact_operator_matches])
             spoken_summary_it = (
-                f"Abbiamo disponibilità per {', '.join(requested_services)} "
-                f"il {preferred_date} alle {', '.join(times_for_speech)}. Quale orario preferisci?"
+                f"Alle {preferred_time} sono disponibili {names}. Vuoi prenotare con uno di loro?"
             )
             spoken_summary_en = (
-                f"We have availability for {', '.join(requested_services)} "
-                f"on {preferred_date} at {', '.join(times_for_speech)}. Which time would you prefer?"
+                f"At {preferred_time}, {names} are available. Would you like to book with one of them?"
             )
+            next_action = "choose_operator_or_confirm_time"
+        elif closest_operator_options:
+            opts = []
+            for opt in closest_operator_options[:3]:
+                opts.append(f"{opt['name']} alle {opt['time']}")
+            opts_str = ", ".join(opts)
+
+            spoken_summary_it = (
+                f"Nessun operatore è disponibile esattamente alle {preferred_time}. "
+                f"Le alternative più vicine sono: {opts_str}. Quale preferisci?"
+            )
+            spoken_summary_en = (
+                f"No operator is available exactly at {preferred_time}. "
+                f"The closest alternatives are: {opts_str}. Which would you prefer?"
+            )
+            next_action = "choose_operator_or_time"
         else:
             spoken_summary_it = (
-                f"Non abbiamo disponibilità per {', '.join(requested_services)} "
-                f"in quella data. Vuoi provare un altro giorno o un altro operatore?"
+                f"Non abbiamo disponibilità intorno alle {preferred_time}. Vuoi provare un altro orario o un altro giorno?"
             )
             spoken_summary_en = (
-                f"We don't have availability for {', '.join(requested_services)} "
-                f"on that date. Would you like to try another day or another operator?"
+                f"We don't have availability around {preferred_time}. Would you like to try another time or a different day?"
             )
+            next_action = "choose_time_or_day"
+
     else:
-        if times_for_speech:
-            spoken_summary_it = (
-                f"Abbiamo disponibilità il {preferred_date} alle {', '.join(times_for_speech)}. "
-                f"Quale orario preferisci?"
-            )
-            spoken_summary_en = (
-                f"We have availability on {preferred_date} at {', '.join(times_for_speech)}. "
-                f"Which time would you prefer?"
-            )
+        if requested_services:
+            if times_for_speech:
+                spoken_summary_it = (
+                    f"Abbiamo disponibilità per {', '.join(requested_services)} "
+                    f"il {preferred_date} alle {', '.join(times_for_speech)}. Quale orario preferisci?"
+                )
+                spoken_summary_en = (
+                    f"We have availability for {', '.join(requested_services)} "
+                    f"on {preferred_date} at {', '.join(times_for_speech)}. Which time would you prefer?"
+                )
+            else:
+                spoken_summary_it = (
+                    f"Non abbiamo disponibilità per {', '.join(requested_services)} "
+                    f"in quella data. Vuoi provare un altro giorno o un altro operatore?"
+                )
+                spoken_summary_en = (
+                    f"We don't have availability for {', '.join(requested_services)} "
+                    f"on that date. Would you like to try another day or another operator?"
+                )
         else:
-            spoken_summary_it = (
-                f"Non abbiamo disponibilità in quella data. Vuoi provare un altro giorno o un altro operatore?"
-            )
-            spoken_summary_en = (
-                f"We don't have availability on that date. Would you like to try another day or another operator?"
-            )
+            if times_for_speech:
+                spoken_summary_it = (
+                    f"Abbiamo disponibilità il {preferred_date} alle {', '.join(times_for_speech)}. "
+                    f"Quale orario preferisci?"
+                )
+                spoken_summary_en = (
+                    f"We have availability on {preferred_date} at {', '.join(times_for_speech)}. "
+                    f"Which time would you prefer?"
+                )
+            else:
+                spoken_summary_it = (
+                    f"Non abbiamo disponibilità in quella data. Vuoi provare un altro giorno o un altro operatore?"
+                )
+                spoken_summary_en = (
+                    f"We don't have availability on that date. Would you like to try another day or another operator?"
+                )
 
     return {
         "success": True,
         "conversation_id": payload.conversation_id,
         "booking_context": updated_state,
         "availability": availability_result,
+        "operators_available_at_requested_time": exact_operator_matches,
+        "closest_operator_options": closest_operator_options,
         "spoken_summary_it": spoken_summary_it,
         "spoken_summary_en": spoken_summary_en,
         "next_action": next_action

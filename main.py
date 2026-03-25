@@ -302,6 +302,28 @@ def minutes_to_quarter_time(total: int) -> str:
     m = str(total % 60).zfill(2)
     return f"{h}:{m}"
 
+def normalize_date_to_iso(date_str: str | None) -> str | None:
+    if not date_str:
+        return date_str
+
+    date_str = date_str.strip()
+
+    # already ISO
+    try:
+        dt = datetime.strptime(date_str, "%Y-%m-%d")
+        return dt.strftime("%Y-%m-%d")
+    except Exception:
+        pass
+
+    # dd-MM-yyyy
+    try:
+        dt = datetime.strptime(date_str, "%d-%m-%Y")
+        return dt.strftime("%Y-%m-%d")
+    except Exception:
+        pass
+
+    return date_str
+    
 def compute_valid_start_times(available_slots: list[str], required_operator_minutes: int) -> list[str]:
     if required_operator_minutes <= 0:
         return sorted(set(available_slots))
@@ -2318,7 +2340,7 @@ async def update_booking_context_endpoint(request: Request, payload: UpdateBooki
         updates["operator_preference"] = payload.operator_preference
 
     if payload.preferred_date is not None:
-        updates["preferred_date"] = payload.preferred_date
+        updates["preferred_date"] = normalize_date_to_iso(payload.preferred_date)
 
     if payload.preferred_time is not None:
         updates["preferred_time"] = payload.preferred_time

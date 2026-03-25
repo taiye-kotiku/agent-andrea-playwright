@@ -1753,7 +1753,7 @@ async def run_availability_check(request: AvailabilityRequest) -> dict:
                 "id": op["id"],
                 "present": op["present"]
             }
-            for op in operator_list
+            for op in filtered_ops
             if op.get("present")
         ],
             "all_available_times": sorted_times,

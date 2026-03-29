@@ -37,6 +37,13 @@ call_states: dict[str, dict[str, Any]] = {}
 call_states_lock = asyncio.Lock()
 CALL_STATE_TTL_SECONDS = 60 * 60  # 1 hour
 
+wegest_pool: dict[str, WegestPoolSession] = {}
+conversation_to_pool_session: dict[str, str] = {}
+
+POOL_SIZE = 2
+pool_lock = asyncio.Lock()
+
+
 
 @dataclass
 class WegestSession:
@@ -53,6 +60,23 @@ class WegestSession:
         if self.lock is None:
             self.lock = asyncio.Lock()
 
+@dataclass
+class WegestPoolSession:
+    id: str
+    playwright: Any = None
+    browser: Any = None
+    context: Any = None
+    page: Any = None
+    lock: asyncio.Lock = None
+    logged_in: bool = False
+    agenda_open: bool = False
+    in_use: bool = False
+    assigned_conversation_id: str | None = None
+    last_used_at: Optional[datetime] = None
+
+    def __post_init__(self):
+        if self.lock is None:
+            self.lock = asyncio.Lock()
 
 availability_cache = {
     "updated_at": None,
@@ -732,6 +756,123 @@ async def invalidate_cached_day(date_str: str):
             availability_cache["updated_at"] = datetime.utcnow().isoformat()
             save_cache_to_disk()
             logger.info(f"🗑️ Invalidated cache for {date_str}")
+
+async def reset_pool_session(pool_id: str):
+    async with pool_lock:
+        session = wegest_pool.get(pool_id)
+        if not session:
+            return
+
+    try:
+        if session.page:
+            await session.page.close()
+    except Exception:
+        pass
+    try:
+        if session.context:
+            await session.context.close()
+    except Exception:
+        pass
+    try:
+        if session.browser:
+            await session.browser.close()
+    except Exception:
+        pass
+    try:
+        if session.playwright:
+            await session.playwright.stop()
+    except Exception:
+        pass
+
+    async with pool_lock:
+        wegest_pool.pop(pool_id, None)
+
+    logger.info(f"♻️ Pool session reset: {pool_id}")
+
+
+async def create_and_warm_pool_session(pool_id: str):
+    WEGEST_USER = os.environ.get("WEGEST_USERNAME", "")
+    WEGEST_PASSWORD = os.environ.get("WEGEST_PASSWORD", "")
+    LOGIN_URL = "https://www.i-salon.eu/login/default.asp?login=&"
+
+    session = WegestPoolSession(id=pool_id)
+
+    p = await async_playwright().start()
+    browser = await p.chromium.launch(
+        headless=True,
+        args=["--no-sandbox", "--disable-setuid-sandbox", "--disable-dev-shm-usage", "--disable-gpu"]
+    )
+    context = await browser.new_context(
+        viewport={"width": 1280, "height": 900},
+        user_agent="Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 Chrome/120.0.0.0 Safari/537.36"
+    )
+    page = await context.new_page()
+
+    session.playwright = p
+    session.browser = browser
+    session.context = context
+    session.page = page
+    session.last_used_at = datetime.utcnow()
+
+    logger.info(f"🔥 Warming pool session {pool_id}...")
+
+    await page.goto(LOGIN_URL, wait_until="networkidle", timeout=60000)
+    await page.wait_for_timeout(5000)
+
+    await page.fill("input[name='username']", WEGEST_USER)
+    await page.fill("input[name='password']", WEGEST_PASSWORD)
+    await page.evaluate("document.querySelector('input[name=\"codice\"]').value = '1'")
+
+    await page.click("div.button")
+
+    try:
+        await page.wait_for_function(
+            """() => {
+                const lp = document.getElementById('pannello_login');
+                return lp && getComputedStyle(lp).display === 'none';
+            }""",
+            timeout=60000
+        )
+    except Exception:
+        pass
+
+    await page.wait_for_timeout(30000)
+
+    login_visible = await page.evaluate("""() => {
+        const el = document.getElementById('pannello_login');
+        return el ? getComputedStyle(el).display !== 'none' : false;
+    }""")
+    if login_visible:
+        raise Exception(f"Pool session {pool_id} login failed")
+
+    session.logged_in = True
+    logger.info(f"✅ Pool session {pool_id} logged in")
+
+    await dismiss_system_modals(page, "post-login")
+    await page.wait_for_timeout(2000)
+
+    await page.click("[pannello='pannello_agenda']")
+    await page.wait_for_timeout(5000)
+    await dismiss_system_modals(page, "after-agenda")
+    await page.wait_for_timeout(2000)
+
+    session.agenda_open = True
+    logger.info(f"📅 Pool session {pool_id} agenda ready")
+
+    async with pool_lock:
+        wegest_pool[pool_id] = session
+
+
+async def warm_pool_on_startup():
+    await asyncio.sleep(5)
+
+    for i in range(POOL_SIZE):
+        pool_id = f"pool_{i+1}"
+        try:
+            await create_and_warm_pool_session(pool_id)
+        except Exception as e:
+            logger.warning(f"Failed to warm {pool_id}: {e}")
+
 
 @app.get("/health")
 async def health():
@@ -2749,5 +2890,6 @@ async def startup_event():
     load_service_catalog()
     asyncio.create_task(cleanup_call_states_forever())
     asyncio.create_task(cleanup_wegest_sessions_forever())
-    logger.info("🚀 App started (background refresh disabled)")
+    asyncio.create_task(warm_pool_on_startup())
+    logger.info("🚀 App started (background refresh disabled, warm pool starting)")
 

@@ -619,6 +619,35 @@ async def is_wegest_session_alive(conversation_id: str) -> bool:
     except Exception:
         return False
 
+
+async def get_assigned_pool_session(conversation_id: str) -> WegestPoolSession | None:
+    async with pool_lock:
+        pool_id = conversation_to_pool_session.get(conversation_id)
+        if not pool_id:
+            return None
+        return wegest_pool.get(pool_id)
+
+
+async def assign_idle_pool_session_to_conversation(conversation_id: str) -> WegestPoolSession:
+    async with pool_lock:
+        # If already assigned, return existing
+        existing_pool_id = conversation_to_pool_session.get(conversation_id)
+        if existing_pool_id and existing_pool_id in wegest_pool:
+            return wegest_pool[existing_pool_id]
+
+        # Find idle session
+        for pool_id, session in wegest_pool.items():
+            if not session.in_use:
+                session.in_use = True
+                session.assigned_conversation_id = conversation_id
+                session.last_used_at = datetime.utcnow()
+                conversation_to_pool_session[conversation_id] = pool_id
+                logger.info(f"🔗 Assigned {pool_id} to conversation {conversation_id}")
+                return session
+
+    raise Exception("No warm session available in pool")
+    
+
 async def ensure_wegest_browser(conversation_id: str):
     session = await get_or_create_wegest_session(conversation_id)
 
@@ -862,6 +891,14 @@ async def create_and_warm_pool_session(pool_id: str):
     async with pool_lock:
         wegest_pool[pool_id] = session
 
+async def get_live_session_for_conversation(conversation_id: str) -> WegestPoolSession:
+    session = await get_assigned_pool_session(conversation_id)
+    if session:
+        return session
+
+    # Fallback: assign one now if available
+    return await assign_idle_pool_session_to_conversation(conversation_id)
+    
 
 async def warm_pool_on_startup():
     await asyncio.sleep(5)
@@ -996,14 +1033,28 @@ async def run_wegest_booking(request: BookingRequest) -> dict:
     if not request.conversation_id:
         raise Exception("conversation_id is required for live booking")
 
-    session = await get_or_create_wegest_session(request.conversation_id)
+    session = await get_live_session_for_conversation(request.conversation_id)
 
     async with session.lock:
         page = None
 
         try:
-            await ensure_wegest_agenda_open(request.conversation_id)
             page = session.page
+
+            state_ok = await page.evaluate("""() => {
+                const loginPanel = document.getElementById('pannello_login');
+                const agendaBtn = document.querySelector("[pannello='pannello_agenda']");
+                const menu = document.getElementById('menu');
+
+                return (
+                    !(loginPanel && getComputedStyle(loginPanel).display !== 'none') &&
+                    (!!agendaBtn || !!menu)
+                );
+            }""")
+
+            if not state_ok:
+                raise Exception("Assigned pool session is not ready for booking")
+
             session.last_used_at = datetime.utcnow()
 
             screenshots.clear()
@@ -1017,9 +1068,7 @@ async def run_wegest_booking(request: BookingRequest) -> dict:
 
             logger.info(f"Requested services: {requested_services}")
 
-            # ═══════════════════════════════════════════
             # STEP 5: Click date
-            # ═══════════════════════════════════════════
             target = datetime.strptime(request.preferred_date, "%Y-%m-%d")
             day, month, year = target.day, target.month, target.year
             logger.info(f"Step 5: Date {day}/{month}/{year}...")
@@ -1047,10 +1096,7 @@ async def run_wegest_booking(request: BookingRequest) -> dict:
             await dismiss_system_modals(page, "after-date")
             await snap(page, "05_date")
 
-            # ═══════════════════════════════════════════
             # STEP 6: Click time slot
-            # Respect operator preference at cell-click stage
-            # ═══════════════════════════════════════════
             raw_hour = int(request.preferred_time.split(":")[0])
             raw_minute = int(request.preferred_time.split(":")[1]) if ":" in request.preferred_time else 0
             rounded_minute = (raw_minute // 15) * 15
@@ -1105,7 +1151,6 @@ async def run_wegest_booking(request: BookingRequest) -> dict:
                 base += ":not(.assente):not(.occupata)"
                 return base
 
-            # Specific operator requested
             if preferred_op_id:
                 logger.info(f"Trying specific operator slot for id_operatore={preferred_op_id}")
 
@@ -1168,7 +1213,6 @@ async def run_wegest_booking(request: BookingRequest) -> dict:
                         f"No available slot for operator '{request.operator_preference}' on {request.preferred_date} around {request.preferred_time}"
                     )
 
-            # First available operator
             else:
                 logger.info("Using prima disponibile logic")
 
@@ -1246,9 +1290,7 @@ async def run_wegest_booking(request: BookingRequest) -> dict:
             await page.wait_for_timeout(3000)
             await snap(page, "06_time")
 
-            # ═══════════════════════════════════════════
             # STEP 7: Customer search & selection
-            # ═══════════════════════════════════════════
             logger.info(f"Step 7: Customer '{request.customer_name}'...")
             customer_found = False
 
@@ -1445,9 +1487,7 @@ async def run_wegest_booking(request: BookingRequest) -> dict:
 
             await page.wait_for_timeout(2000)
 
-            # ═══════════════════════════════════════════
-            # STEP 7.5: Phone number modal (if it appears)
-            # ═══════════════════════════════════════════
+            # STEP 7.5: Phone modal
             phone_handled = await page.evaluate(f"""
                 () => {{
                     const m = document.querySelector('.modale.card.inserisci_cellulare');
@@ -1475,18 +1515,13 @@ async def run_wegest_booking(request: BookingRequest) -> dict:
 
             await snap(page, "08_form_ready")
 
-            # ═══════════════════════════════════════════
-            # STEP 8: Select one or more services
-            # Verified:
-            #   available buttons: .pulsanti_tab .servizio[nome]
-            #   selected rows: .servizi_selezionati .riga_servizio
-            # ═══════════════════════════════════════════
+            # STEP 8: Select services
             logger.info(f"Step 8: Services {requested_services}...")
 
             initial_rows = await page.evaluate("""
                 () => document.querySelectorAll('.servizi_selezionati .riga_servizio').length
             """)
-            await update_service_catalog_from_page(page)
+
             selected_services = []
 
             for index, requested_service in enumerate(requested_services, start=1):
@@ -1620,9 +1655,7 @@ async def run_wegest_booking(request: BookingRequest) -> dict:
             logger.info(f"✅ Total selected services: {selected_services}")
             await snap(page, "09_services_selected")
 
-            # ═══════════════════════════════════════════
             # STEP 9: Select operator in appointment form
-            # ═══════════════════════════════════════════
             if request.operator_preference.lower() != "prima disponibile":
                 op_safe = js_escape(request.operator_preference.lower())
                 logger.info(f"Step 9: Operator '{request.operator_preference}'...")
@@ -1657,9 +1690,7 @@ async def run_wegest_booking(request: BookingRequest) -> dict:
             await page.wait_for_timeout(1000)
             await snap(page, "10_operator")
 
-            # ═══════════════════════════════════════════
-            # STEP 10: Click "Add appointment"
-            # ═══════════════════════════════════════════
+            # STEP 10: Add appointment
             logger.info("Step 10: Adding appointment...")
 
             added = await page.evaluate("""
@@ -1691,9 +1722,7 @@ async def run_wegest_booking(request: BookingRequest) -> dict:
             await dismiss_system_modals(page, "post-save")
             await page.wait_for_timeout(2000)
 
-            # ═══════════════════════════════════════════
             # VERIFY
-            # ═══════════════════════════════════════════
             on_agenda = await page.evaluate("""
                 () => {
                     const a = document.getElementById('pannello_agenda');
@@ -1765,11 +1794,6 @@ async def run_wegest_booking(request: BookingRequest) -> dict:
             if page:
                 await snap(page, "ERROR", force=True)
 
-            try:
-                await reset_wegest_session(request.conversation_id)
-            except Exception:
-                pass
-
             return {
                 "success": False,
                 "error": str(e),
@@ -1780,9 +1804,13 @@ async def run_wegest_booking(request: BookingRequest) -> dict:
 async def run_availability_check(request: AvailabilityRequest) -> dict:
     requested_services = normalize_requested_services(request.service, request.services)
 
-    # 1. If live session is active, prefer live over cache
-    if request.conversation_id and await is_wegest_session_alive(request.conversation_id):
-        logger.info(f"🟢 Live session available — bypassing cache for {request.preferred_date}")
+    assigned_session = None
+    if request.conversation_id:
+        assigned_session = await get_assigned_pool_session(request.conversation_id)
+
+    # 1. If warm live session is assigned, prefer live
+    if assigned_session:
+        logger.info(f"🟢 Assigned warm session available — bypassing cache for {request.preferred_date}")
         fresh = await run_live_availability_check(request)
 
         if fresh and fresh.get("is_open") is True and "operators" in fresh:
@@ -1801,7 +1829,6 @@ async def run_availability_check(request: AvailabilityRequest) -> dict:
 
         operator_pref = (request.operator_preference or "prima disponibile").lower().strip()
 
-        # Compute required duration from service_catalog first, fallback second
         catalog_services = service_catalog.get("services", {})
         required_operator_minutes = 0
         missing_service_durations = []
@@ -1845,7 +1872,6 @@ async def run_availability_check(request: AvailabilityRequest) -> dict:
         if missing_service_durations:
             logger.warning(f"Cache-hit missing durations for services: {missing_service_durations}")
 
-        # Filter operators and recompute valid_start_times from cached raw slots
         filtered_ops = []
         all_times = set()
         all_valid_times = set()
@@ -1915,14 +1941,14 @@ async def run_availability_check(request: AvailabilityRequest) -> dict:
             "required_operator_minutes": required_operator_minutes,
             "operators": filtered_ops,
             "active_operators": [
-            {
-                "name": op["name"],
-                "id": op["id"],
-                "present": op["present"]
-            }
-            for op in filtered_ops
-            if op.get("present")
-        ],
+                {
+                    "name": op["name"],
+                    "id": op["id"],
+                    "present": op["present"]
+                }
+                for op in filtered_ops
+                if op.get("present")
+            ],
             "all_available_times": sorted_times,
             "all_valid_start_times": sorted_valid_times,
             "hourly_summary": hourly,
@@ -1934,16 +1960,16 @@ async def run_availability_check(request: AvailabilityRequest) -> dict:
             "source": "cache"
         }
 
-    # 3. No session and no cache -> live fetch
+    # 3. No assigned warm session and no cache -> no live pool session path
     logger.info(f"🐢 Availability cache MISS for {request.preferred_date}")
-    fresh = await run_live_availability_check(request)
-
-    if fresh and fresh.get("is_open") is True and "operators" in fresh:
-        await set_cached_day(request.preferred_date, fresh)
-
     return {
-        **fresh,
-        "source": "live"
+        "success": False,
+        "date": request.preferred_date,
+        "is_open": False,
+        "message": "No warm live session available and no cached availability available",
+        "available_slots": [],
+        "operators": [],
+        "source": "none"
     }
 
 
@@ -2011,12 +2037,28 @@ async def run_live_availability_check(request: AvailabilityRequest) -> dict:
     if not request.conversation_id:
         raise Exception("conversation_id is required for live availability checks")
 
-    session = await get_or_create_wegest_session(request.conversation_id)
+    session = await get_live_session_for_conversation(request.conversation_id)
 
     async with session.lock:
         try:
-            await ensure_wegest_agenda_open(request.conversation_id)
             page = session.page
+
+            # verify session still healthy
+            state_ok = await page.evaluate("""() => {
+                const loginPanel = document.getElementById('pannello_login');
+                const agendaBtn = document.querySelector("[pannello='pannello_agenda']");
+                const menu = document.getElementById('menu');
+
+                return (
+                    !(loginPanel && getComputedStyle(loginPanel).display !== 'none') &&
+                    (!!agendaBtn || !!menu)
+                );
+            }""")
+
+            if not state_ok:
+                raise Exception("Assigned pool session is not ready")
+
+            session.last_used_at = datetime.utcnow()
 
             result = await scrape_day_availability_from_page(
                 page,
@@ -2026,18 +2068,12 @@ async def run_live_availability_check(request: AvailabilityRequest) -> dict:
                 service=request.service
             )
 
-            session.last_used_at = datetime.utcnow()
             return result
 
         except Exception as e:
             logger.error(f"❌ Availability error for {request.conversation_id}: {e}")
             try:
                 await snap(session.page, "avail_ERROR", force=True)
-            except Exception:
-                pass
-
-            try:
-                await reset_wegest_session(request.conversation_id)
             except Exception:
                 pass
 
@@ -2850,38 +2886,55 @@ async def prepare_live_session_endpoint(request: Request, payload: PrepareLiveSe
     if not payload.conversation_id:
         raise HTTPException(status_code=400, detail="conversation_id required")
 
-    session = await get_or_create_wegest_session(payload.conversation_id)
+    try:
+        session = await assign_idle_pool_session_to_conversation(payload.conversation_id)
 
-    async with session.lock:
-        try:
-            await ensure_wegest_agenda_open(payload.conversation_id)
-            session.last_used_at = datetime.utcnow()
-
-            await update_call_state(payload.conversation_id, {
-                "session_prepared": True
-            })
-
-            return {
-                "success": True,
-                "conversation_id": payload.conversation_id,
-                "session_ready": True,
-                "message": "Live Wegest session is ready"
-            }
-
-        except Exception as e:
-            logger.error(f"❌ Session warm-up failed for {payload.conversation_id}: {e}")
-
+        async with session.lock:
+            # Verify still alive
             try:
-                await reset_wegest_session(payload.conversation_id)
-            except Exception:
-                pass
+                if not session.page or session.page.is_closed():
+                    raise Exception("Pool session page is closed")
 
-            return {
-                "success": False,
-                "conversation_id": payload.conversation_id,
-                "session_ready": False,
-                "message": f"Session warm-up failed: {e}"
-            }
+                state = await session.page.evaluate("""() => {
+                    const loginPanel = document.getElementById('pannello_login');
+                    const agendaBtn = document.querySelector("[pannello='pannello_agenda']");
+                    const menu = document.getElementById('menu');
+
+                    return {
+                        loginVisible: loginPanel ? getComputedStyle(loginPanel).display !== 'none' : false,
+                        hasAgendaButton: !!agendaBtn,
+                        hasMenu: !!menu
+                    };
+                }""")
+
+                if state.get("loginVisible", False) or not (state.get("hasAgendaButton", False) or state.get("hasMenu", False)):
+                    raise Exception("Pool session is no longer ready")
+
+                session.last_used_at = datetime.utcnow()
+
+                await update_call_state(payload.conversation_id, {
+                    "session_prepared": True
+                })
+
+                return {
+                    "success": True,
+                    "conversation_id": payload.conversation_id,
+                    "session_ready": True,
+                    "message": "Live Wegest session is ready"
+                }
+
+            except Exception as session_err:
+                logger.warning(f"Assigned pool session failed health check: {session_err}")
+                raise session_err
+
+    except Exception as e:
+        logger.error(f"❌ Session warm-up failed for {payload.conversation_id}: {e}")
+        return {
+            "success": False,
+            "conversation_id": payload.conversation_id,
+            "session_ready": False,
+            "message": f"No live session available right now: {e}"
+        }
 
 @app.on_event("startup")
 async def startup_event():

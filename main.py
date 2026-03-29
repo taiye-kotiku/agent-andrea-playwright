@@ -37,12 +37,6 @@ call_states: dict[str, dict[str, Any]] = {}
 call_states_lock = asyncio.Lock()
 CALL_STATE_TTL_SECONDS = 60 * 60  # 1 hour
 
-wegest_pool: dict[str, WegestPoolSession] = {}
-conversation_to_pool_session: dict[str, str] = {}
-
-POOL_SIZE = 2
-pool_lock = asyncio.Lock()
-
 
 
 @dataclass
@@ -89,6 +83,12 @@ wegest_sessions: dict[str, WegestSession] = {}
 wegest_sessions_lock = asyncio.Lock()
 MAX_CONCURRENT_SESSIONS = 3
 SESSION_IDLE_TTL_SECONDS = 60 * 15  # 15 minutes
+
+wegest_pool: dict[str, WegestPoolSession] = {}
+conversation_to_pool_session: dict[str, str] = {}
+
+POOL_SIZE = 2
+pool_lock = asyncio.Lock()
 
 def js_escape(s: str) -> str:
     return s.replace("\\", "\\\\").replace("'", "\\'").replace('"', '\\"').replace("\n", "\\n")

@@ -1,0 +1,45 @@
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+*.egg-info/
+dist/
+build/
+*.egg
+venv/
+env/
+
+# Environment
+.env
+.env.local
+.env.*.local
+
+# IDEs
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Application specific
+*.json
+!operator_catalog.json
+!service_catalog.json
+screenshots/
+logs/
+.git/
+.gitignore
+
+# Testing
+tests/
+pytest.ini
+tox.ini
+
+# Documentation (optional, remove if needed)
+*.md
+!requirements.txt

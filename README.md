@@ -14,32 +14,32 @@ Automated booking service for Wegest using Playwright and FastAPI.
 
 ```
 agent-andrea-playwright/
-├── app/
-│   ├── __init__.py
-│   ├── main.py              # FastAPI app initialization
-│   ├── models.py            # Pydantic models
-│   ├── core/
-│   │   ├── config.py       # Configuration (pydantic BaseSettings)
-│   │   ├── auth.py         # Authentication dependencies
-│   │   └── session.py     # Session management
-│   ├── routers/
-│   │   ├── booking.py      # /api/book, /api/check-availability
-│   │   ├── context.py      # Booking context endpoints
-│   │   ├── session.py      # Session management endpoints
-│   │   └── admin.py       # Admin endpoints (cache, catalog)
-│   ├── services/
-│   │   ├── wegest.py       # Playwright automation
-│   │   ├── catalog.py      # Operator/service catalog
-│   │   ├── cache.py        # Availability cache
-│   │   └── call_state.py   # Conversation state tracking
-│   └── utils/
-│       ├── time_utils.py    # Time parsing utilities
-│       └── helpers.py       # General helpers
+├── main.py                    # Entry point (imports config & api)
+├── config.py                  # Configuration, data classes, global state
+├── api.py                    # FastAPI routes + startup event
+├── api_models.py             # Pydantic request/response models
+├── utils.py                  # Utility functions, state management
+├── session_manager.py        # Browser sessions, pool management + health monitor
+├── catalog.py                # Catalog & page extraction
+├── booking.py                # Booking logic (run_wegest_booking)
+├── availability.py            # Availability check logic
+├── main.py.bak               # Original monolithic file (reference)
 ├── requirements.txt
 ├── Dockerfile
 ├── .gitignore
 └── .env.example
 ```
+
+**Modular Structure (8 files + entry point):**
+- `main.py` - Entry point, imports config & api to register routes
+- `config.py` - Configuration, dataclasses (WegestSession, WegestPoolSession), global state
+- `api.py` - FastAPI routes (/book, /check-availability, etc.) + startup event
+- `api_models.py` - Pydantic models (BookingRequest, AvailabilityRequest, etc.)
+- `utils.py` - Utility functions, call state CRUD, catalog load/save
+- `session_manager.py` - Playwright sessions, pool warming, **pool health monitor**
+- `catalog.py` - Wegest catalog management, page scraping
+- `booking.py` - Booking flow logic
+- `availability.py` - Availability check logic, background refresh
 
 ## Setup
 
@@ -89,13 +89,13 @@ cp .env.example .env
 ### Development
 
 ```bash
-python -m uvicorn app.main:app --reload --host 0.0.0.0 --port 8000
+python -m uvicorn main:app --reload --host 0.0.0.0 --port 8000
 ```
 
 ### Production
 
 ```bash
-python -m uvicorn app.main:app --host 0.0.0.0 --port ${PORT:-8000}
+python -m uvicorn main:app --host 0.0.0.0 --port ${PORT:-8000}
 ```
 
 ## API Endpoints
@@ -176,6 +176,7 @@ The application runs several background tasks:
 - **Call State Cleanup**: Removes expired conversation states (every 5 minutes)
 - **Session Cleanup**: Cleans up idle Wegest sessions (every 5 minutes)
 - **Pool Warming**: Warms up browser session pool on startup
+- **Pool Health Monitor**: Continuously monitors and replenishes the session pool (every 60s) to ensure sessions are always ready
 
 ## License
 

@@ -32,19 +32,10 @@ Thumbs.db
 !service_catalog.json
 screenshots/
 logs/
-*.bak
 
 # Playwright
 .playwright/
 
 # Testing
-tests/
-pytest.ini
-tox.ini
+# (keep tests and pytest.ini in repo)
 
-# Documentation (optional, remove if needed)
-*.md
-!requirements.txt
-!README.md
-!API.md
-!DEPLOYMENT.md

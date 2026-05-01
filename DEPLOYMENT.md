@@ -266,7 +266,7 @@ curl https://agent-andrea.srv1252881.hstgr.cloud/health
 
 ```bash
 # Check if running
-ps aux | grep "app.main"
+ps aux | grep "main.py"
 
 # Check port
 ss -tlnp | grep 8000
@@ -285,7 +285,7 @@ journalctl -u agent-andrea -n 50 --no-pager
 # Check configuration
 cd /opt/agent-andrea-playwright
 source venv/bin/activate
-python -c "from app.main import app; print('OK')"
+python -c "from main import app; print('OK')"
 
 # Check .env file
 cat /opt/agent-andrea-playwright/.env

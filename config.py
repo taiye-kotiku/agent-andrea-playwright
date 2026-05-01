@@ -30,7 +30,7 @@ API_SECRET = os.environ.get("API_SECRET", "changeme")
 DEBUG_SCREENSHOTS = os.environ.get("DEBUG_SCREENSHOTS", "false").lower() == "true"
 WEGEST_USER = os.environ.get("WEGEST_USERNAME", "")
 WEGEST_PASSWORD = os.environ.get("WEGEST_PASSWORD", "")
-LOGIN_URL = "https://www.i-salon.eu/login/default.asp?login=&"
+LOGIN_URL = "https://www.i-salon.eu/login/default.asp?login=&piattaforma=web"
 
 # Catalog files
 OPERATOR_CATALOG_FILE = Path("operator_catalog.json")

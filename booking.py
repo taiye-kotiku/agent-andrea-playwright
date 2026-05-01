@@ -2,7 +2,8 @@
 Booking logic for Agent Andrea
 """
 
-from config import logger, API_SECRET
+import config
+from config import logger, API_SECRET, screenshots
 from session_manager import (
     get_live_session_for_conversation,
     dismiss_system_modals,

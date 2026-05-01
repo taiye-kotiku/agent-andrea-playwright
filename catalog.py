@@ -3,6 +3,8 @@ Catalog and page extraction functions for Agent Andrea
 """
 
 import config
+from datetime import datetime
+from config import logger, service_catalog, SERVICE_DURATION_FALLBACK
 from playwright.async_api import async_playwright
 from typing import Any, Optional
 
@@ -107,7 +109,6 @@ async def scrape_day_availability_from_page(
     from datetime import datetime
     from utils import (
         normalize_requested_services,
-        extract_service_operator_durations_from_page,
         compute_valid_start_times,
         quarter_time_to_minutes,
         minutes_to_quarter_time,

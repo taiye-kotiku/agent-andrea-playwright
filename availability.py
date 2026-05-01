@@ -2,8 +2,9 @@
 Availability check logic for Agent Andrea
 """
 
+import config
 from config import logger, API_SECRET, service_catalog, SERVICE_DURATION_FALLBACK
-from session_manager import get_live_session_for_conversation, dismiss_system_modals, snap
+from session_manager import get_live_session_for_conversation, get_assigned_pool_session, dismiss_system_modals, snap
 from utils import (
     normalize_requested_services,
     compute_valid_start_times,

@@ -4,7 +4,26 @@ FastAPI routes for Agent Andrea
 
 from fastapi import FastAPI, HTTPException, Request
 from fastapi.responses import HTMLResponse
+import config
 from config import app, API_SECRET, DEBUG_SCREENSHOTS, screenshots, logger
+from starlette.responses import JSONResponse
+from starlette.requests import Request as StarletteRequest
+import traceback
+
+@app.exception_handler(Exception)
+async def global_exception_handler(request: Request, exc: Exception):
+    logger.error(f"❌ Unhandled exception: {exc}")
+    logger.error(traceback.format_exc())
+    return JSONResponse(
+        status_code=200,  # Return 200 with error details instead of 500
+        content={
+            "success": False,
+            "error": str(exc),
+            "traceback": traceback.format_exc(),
+            "message": f"Error: {exc}",
+            "next_action": "retry_or_apologize"
+        }
+    )
 from api_models import (
     BookingRequest,
     UpdateBookingContextRequest,
@@ -27,12 +46,12 @@ import base64
 import asyncio
 
 
-@app.get("/api/api/health")
+@app.get("/health")
 async def health():
     return {"status": "ok", "service": "Agent Andrea Wegest Booking"}
 
 
-@app.get("/api/api/screenshots", response_class=HTMLResponse)
+@app.get("/screenshots", response_class=HTMLResponse)
 async def view_screenshots():
     if not screenshots:
         return "<h2>No screenshots yet — run a booking first</h2>"
@@ -45,7 +64,7 @@ async def view_screenshots():
     return html
 
 
-@app.post("/api/book")
+@app.post("/book")
 async def book_appointment(request: Request, booking: BookingRequest):
     auth = request.headers.get("Authorization") or request.headers.get("authorization") or ""
     if auth != f"Bearer {API_SECRET}":
@@ -76,7 +95,7 @@ async def book_appointment(request: Request, booking: BookingRequest):
     return result
 
 
-@app.post("/api/check-availability")
+@app.post("/check-availability")
 async def check_availability(request: Request, avail: AvailabilityRequest):
     auth = request.headers.get("Authorization") or request.headers.get("authorization") or ""
     if auth != f"Bearer {API_SECRET}":
@@ -100,7 +119,7 @@ async def check_availability(request: Request, avail: AvailabilityRequest):
     return result
 
 
-@app.post("/api/invalidate-cache")
+@app.post("/invalidate-cache")
 async def invalidate_cache(request: Request):
     auth = request.headers.get("Authorization") or request.headers.get("authorization") or ""
     if auth != f"Bearer {API_SECRET}":
@@ -116,7 +135,7 @@ async def invalidate_cache(request: Request):
     return {"ok": True, "invalidated": date_str}
 
 
-@app.post("/api/get-service-duration")
+@app.post("/get-service-duration")
 async def get_service_duration_endpoint(request: Request, payload: ServiceDurationRequest):
     auth = request.headers.get("Authorization") or request.headers.get("authorization") or ""
     if auth != f"Bearer {API_SECRET}":
@@ -131,7 +150,7 @@ async def get_service_duration_endpoint(request: Request, payload: ServiceDurati
             "services": []
         }
 
-    catalog_services = service_catalog.get("services", {})
+    catalog_services = config.service_catalog.get("services", {})
     results = []
 
     for svc in requested_services:
@@ -210,7 +229,7 @@ async def get_service_duration_endpoint(request: Request, payload: ServiceDurati
     }
 
 
-@app.post("/api/update-booking-context")
+@app.post("/update-booking-context")
 async def update_booking_context_endpoint(request: Request, payload: UpdateBookingContextRequest):
     auth = request.headers.get("Authorization") or request.headers.get("authorization") or ""
     if auth != f"Bearer {API_SECRET}":
@@ -254,7 +273,7 @@ async def update_booking_context_endpoint(request: Request, payload: UpdateBooki
     }
 
 
-@app.post("/api/get-booking-context")
+@app.post("/get-booking-context")
 async def get_booking_context_endpoint(request: Request, payload: GetBookingContextRequest):
     auth = request.headers.get("Authorization") or request.headers.get("authorization") or ""
     if auth != f"Bearer {API_SECRET}":
@@ -282,172 +301,184 @@ async def get_booking_context_endpoint(request: Request, payload: GetBookingCont
     }
 
 
-@app.post("/api/check-booking-options")
+@app.post("/check-booking-options")
 async def check_booking_options_endpoint(request: Request, payload: CheckBookingOptionsRequest):
-    auth = request.headers.get("Authorization") or request.headers.get("authorization") or ""
-    if auth != f"Bearer {API_SECRET}":
-        raise HTTPException(status_code=401, detail="Unauthorized")
+    try:
+        logger.info(f"🔍 check_booking-options called with conversation_id={payload.conversation_id}")
+        auth = request.headers.get("Authorization") or request.headers.get("authorization") or ""
+        if auth != f"Bearer {API_SECRET}":
+            raise HTTPException(status_code=401, detail="Unauthorized")
 
-    from utils import get_call_state, update_call_state
-    state = await get_call_state(payload.conversation_id)
+        from utils import get_call_state, update_call_state
+        state = await get_call_state(payload.conversation_id)
+        logger.info(f"🔍 State for {payload.conversation_id}: preferred_date={state.get('preferred_date')}, services={state.get('services')}")
 
-    services = state.get("services") or []
-    operator_preference = state.get("operator_preference") or "prima disponibile"
-    preferred_date = state.get("preferred_date")
-    preferred_time = state.get("preferred_time")
+        services = state.get("services") or []
+        operator_preference = state.get("operator_preference") or "prima disponibile"
+        preferred_date = state.get("preferred_date")
+        preferred_time = state.get("preferred_time")
 
-    if not preferred_date:
+        if not preferred_date:
+            return {
+                "success": False,
+                "conversation_id": payload.conversation_id,
+                "booking_context": state,
+                "missing_fields": ["preferred_date"],
+                "next_action": "ask_date",
+                "message": "Preferred date is missing"
+            }
+
+        # Build an AvailabilityRequest from stored state
+        avail_request = AvailabilityRequest(
+            preferred_date=preferred_date,
+            operator_preference=operator_preference,
+            services=services,
+            service=None,
+            conversation_id=payload.conversation_id
+        )
+
+        availability_result = await run_availability_check(avail_request)
+
+        # Save latest availability result back to call state
+        updated_state = await update_call_state(payload.conversation_id, {
+            "last_availability_result": availability_result
+        })
+
+        from utils import build_operator_time_suggestions
+        exact_operator_matches = []
+        closest_operator_options = []
+
+        preferred_time = state.get("preferred_time")
+        operator_preference = state.get("operator_preference") or "prima disponibile"
+
+        if preferred_time and operator_preference.lower() == "prima disponibile":
+            exact_operator_matches, closest_operator_options = build_operator_time_suggestions(
+                availability_result.get("operators", []),
+                preferred_time
+            )
+
+        # Decide next action
+        if not availability_result.get("is_open", False):
+            next_action = "choose_day"
+        elif availability_result.get("requested_services"):
+            valid_times = availability_result.get("all_valid_start_times", [])
+            if valid_times:
+                next_action = "choose_time"
+            else:
+                next_action = "choose_operator_or_day"
+        else:
+            available_times = availability_result.get("all_available_times", [])
+            if available_times:
+                next_action = "choose_time"
+            else:
+                next_action = "choose_operator_or_day"
+
+        # Build spoken summary fallback
+        requested_services = availability_result.get("requested_services", [])
+        all_valid_start_times = availability_result.get("all_valid_start_times", [])
+        all_available_times = availability_result.get("all_available_times", [])
+
+        if requested_services:
+            times_for_speech = all_valid_start_times[:3]
+        else:
+            times_for_speech = all_available_times[:3]
+
+        # Special case: requested time + first available operator
+        if preferred_time and operator_preference.lower() == "prima disponibile":
+            if exact_operator_matches:
+                names = ", ".join([m["name"] for m in exact_operator_matches])
+                spoken_summary_it = (
+                    f"Alle {preferred_time} sono disponibili {names}. Vuoi prenotare con uno di loro?"
+                )
+                spoken_summary_en = (
+                    f"At {preferred_time}, {names} are available. Would you like to book with one of them?"
+                )
+                next_action = "choose_operator_or_confirm_time"
+            elif closest_operator_options:
+                opts = []
+                for opt in closest_operator_options[:3]:
+                    opts.append(f"{opt['name']} alle {opt['time']}")
+                opts_str = ", ".join(opts)
+
+                spoken_summary_it = (
+                    f"Nessun operatore è disponibile esattamente alle {preferred_time}. "
+                    f"Le alternative più vicine sono: {opts_str}. Quale preferisci?"
+                )
+                spoken_summary_en = (
+                    f"No operator is available exactly at {preferred_time}. "
+                    f"The closest alternatives are: {opts_str}. Which would you prefer?"
+                )
+                next_action = "choose_operator_or_time"
+            else:
+                spoken_summary_it = (
+                    f"Non abbiamo disponibilità intorno alle {preferred_time}. Vuoi provare un altro orario o un altro giorno?"
+                )
+                spoken_summary_en = (
+                    f"We don't have availability around {preferred_time}. Would you like to try another time or a different day?"
+                )
+                next_action = "choose_time_or_day"
+
+        else:
+            if requested_services:
+                if times_for_speech:
+                    spoken_summary_it = (
+                        f"Abbiamo disponibilità per {', '.join(requested_services)} "
+                        f"il {preferred_date} alle {', '.join(times_for_speech)}. Quale orario preferisci?"
+                    )
+                    spoken_summary_en = (
+                        f"We have availability for {', '.join(requested_services)} "
+                        f"on {preferred_date} at {', '.join(times_for_speech)}. Which time would you prefer?"
+                    )
+                else:
+                    spoken_summary_it = (
+                        f"Non abbiamo disponibilità per {', '.join(requested_services)} "
+                        f"in quella data. Vuoi provare un altro giorno o un altro operatore?"
+                    )
+                    spoken_summary_en = (
+                        f"We don't have availability for {', '.join(requested_services)} "
+                        f"on that date. Would you like to try another day or another operator?"
+                    )
+            else:
+                if times_for_speech:
+                    spoken_summary_it = (
+                        f"Abbiamo disponibilità il {preferred_date} alle {', '.join(times_for_speech)}. "
+                        f"Quale orario preferisci?"
+                    )
+                    spoken_summary_en = (
+                        f"We have availability on {preferred_date} at {', '.join(times_for_speech)}. "
+                        f"Which time would you prefer?"
+                    )
+                else:
+                    spoken_summary_it = (
+                        f"Non abbiamo disponibilità in quella data. Vuoi provare un altro giorno o un altro operatore?"
+                    )
+                    spoken_summary_en = (
+                        f"We don't have availability on that date. Would you like to try another day or another operator?"
+                    )
+
+        return {
+            "success": True,
+            "conversation_id": payload.conversation_id,
+            "booking_context": updated_state,
+            "availability": availability_result,
+            "operators_available_at_requested_time": exact_operator_matches,
+            "closest_operator_options": closest_operator_options,
+            "spoken_summary_it": spoken_summary_it,
+            "spoken_summary_en": spoken_summary_en,
+            "next_action": next_action
+        }
+    except Exception as e:
+        logger.error(f"❌ Error in check_booking_options: {e}")
         return {
             "success": False,
             "conversation_id": payload.conversation_id,
-            "booking_context": state,
-            "missing_fields": ["preferred_date"],
-            "next_action": "ask_date",
-            "message": "Preferred date is missing"
+            "error": str(e),
+            "message": f"Error: {e}",
+            "next_action": "retry_or_apologize"
         }
 
-    # Build an AvailabilityRequest from stored state
-    avail_request = AvailabilityRequest(
-        preferred_date=preferred_date,
-        operator_preference=operator_preference,
-        services=services,
-        service=None,
-        conversation_id=payload.conversation_id
-    )
 
-    availability_result = await run_availability_check(avail_request)
-
-    # Save latest availability result back to call state
-    updated_state = await update_call_state(payload.conversation_id, {
-        "last_availability_result": availability_result
-    })
-
-    from availability import build_operator_time_suggestions
-    exact_operator_matches = []
-    closest_operator_options = []
-
-    preferred_time = state.get("preferred_time")
-    operator_preference = state.get("operator_preference") or "prima disponibile"
-
-    if preferred_time and operator_preference.lower() == "prima disponibile":
-        exact_operator_matches, closest_operator_options = build_operator_time_suggestions(
-            availability_result.get("operators", []),
-            preferred_time
-        )
-
-    # Decide next action
-    if not availability_result.get("is_open", False):
-        next_action = "choose_day"
-    elif availability_result.get("requested_services"):
-        valid_times = availability_result.get("all_valid_start_times", [])
-        if valid_times:
-            next_action = "choose_time"
-        else:
-            next_action = "choose_operator_or_day"
-    else:
-        available_times = availability_result.get("all_available_times", [])
-        if available_times:
-            next_action = "choose_time"
-        else:
-            next_action = "choose_operator_or_day"
-
-    # Build spoken summary fallback
-    requested_services = availability_result.get("requested_services", [])
-    all_valid_start_times = availability_result.get("all_valid_start_times", [])
-    all_available_times = availability_result.get("all_available_times", [])
-
-    if requested_services:
-        times_for_speech = all_valid_start_times[:3]
-    else:
-        times_for_speech = all_available_times[:3]
-
-    # Special case: requested time + first available operator
-    if preferred_time and operator_preference.lower() == "prima disponibile":
-        if exact_operator_matches:
-            names = ", ".join([m["name"] for m in exact_operator_matches])
-            spoken_summary_it = (
-                f"Alle {preferred_time} sono disponibili {names}. Vuoi prenotare con uno di loro?"
-            )
-            spoken_summary_en = (
-                f"At {preferred_time}, {names} are available. Would you like to book with one of them?"
-            )
-            next_action = "choose_operator_or_confirm_time"
-        elif closest_operator_options:
-            opts = []
-            for opt in closest_operator_options[:3]:
-                opts.append(f"{opt['name']} alle {opt['time']}")
-            opts_str = ", ".join(opts)
-
-            spoken_summary_it = (
-                f"Nessun operatore è disponibile esattamente alle {preferred_time}. "
-                f"Le alternative più vicine sono: {opts_str}. Quale preferisci?"
-            )
-            spoken_summary_en = (
-                f"No operator is available exactly at {preferred_time}. "
-                f"The closest alternatives are: {opts_str}. Which would you prefer?"
-            )
-            next_action = "choose_operator_or_time"
-        else:
-            spoken_summary_it = (
-                f"Non abbiamo disponibilità intorno alle {preferred_time}. Vuoi provare un altro orario o un altro giorno?"
-            )
-            spoken_summary_en = (
-                f"We don't have availability around {preferred_time}. Would you like to try another time or a different day?"
-            )
-            next_action = "choose_time_or_day"
-
-    else:
-        if requested_services:
-            if times_for_speech:
-                spoken_summary_it = (
-                    f"Abbiamo disponibilità per {', '.join(requested_services)} "
-                    f"il {preferred_date} alle {', '.join(times_for_speech)}. Quale orario preferisci?"
-                )
-                spoken_summary_en = (
-                    f"We have availability for {', '.join(requested_services)} "
-                    f"on {preferred_date} at {', '.join(times_for_speech)}. Which time would you prefer?"
-                )
-            else:
-                spoken_summary_it = (
-                    f"Non abbiamo disponibilità per {', '.join(requested_services)} "
-                    f"in quella data. Vuoi provare un altro giorno o un altro operatore?"
-                )
-                spoken_summary_en = (
-                    f"We don't have availability for {', '.join(requested_services)} "
-                    f"on that date. Would you like to try another day or another operator?"
-                )
-        else:
-            if times_for_speech:
-                spoken_summary_it = (
-                    f"Abbiamo disponibilità il {preferred_date} alle {', '.join(times_for_speech)}. "
-                    f"Quale orario preferisci?"
-                )
-                spoken_summary_en = (
-                    f"We have availability on {preferred_date} at {', '.join(times_for_speech)}. "
-                    f"Which time would you prefer?"
-                )
-            else:
-                spoken_summary_it = (
-                    f"Non abbiamo disponibilità in quella data. Vuoi provare un altro giorno o un altro operatore?"
-                )
-                spoken_summary_en = (
-                    f"We don't have availability on that date. Would you like to try another day or another operator?"
-                )
-
-    return {
-        "success": True,
-        "conversation_id": payload.conversation_id,
-        "booking_context": updated_state,
-        "availability": availability_result,
-        "operators_available_at_requested_time": exact_operator_matches,
-        "closest_operator_options": closest_operator_options,
-        "spoken_summary_it": spoken_summary_it,
-        "spoken_summary_en": spoken_summary_en,
-        "next_action": next_action
-    }
-
-
-@app.post("/api/finalize-booking")
+@app.post("/finalize-booking")
 async def finalize_booking_endpoint(request: Request, payload: FinalizeBookingRequest):
     auth = request.headers.get("Authorization") or request.headers.get("authorization") or ""
     if auth != f"Bearer {API_SECRET}":
@@ -499,7 +530,7 @@ async def finalize_booking_endpoint(request: Request, payload: FinalizeBookingRe
     }
 
 
-@app.post("/api/prepare-live-session")
+@app.post("/prepare-live-session")
 async def prepare_live_session_endpoint(request: Request, payload: PrepareLiveSessionRequest):
     auth = request.headers.get("Authorization") or request.headers.get("authorization") or ""
     if auth != f"Bearer {API_SECRET}":
@@ -571,7 +602,7 @@ async def startup_event():
     asyncio.create_task(cleanup_wegest_sessions_forever())
     asyncio.create_task(warm_pool_on_startup())
     asyncio.create_task(ensure_pool_healthy())
-    logger.info("🚀 App started (background refresh disabled, warm pool starting, health monitor active)")
+    logger.info("🚀 App started (background refresh disabled, warm pool starting)")
 
 
 async def cleanup_call_states_forever():

@@ -1,5 +1,5 @@
 """
-Session management for Wegest browser sessions
+Session management for Wegest browser sessions - extracted from main.py.bak
 """
 
 from config import (
@@ -14,12 +14,35 @@ from config import (
     WEGEST_USER,
     WEGEST_PASSWORD,
     LOGIN_URL,
-    logger
+    logger,
+    DEBUG_SCREENSHOTS,
+    screenshots
 )
 from playwright.async_api import async_playwright
 from datetime import datetime, timedelta
 from typing import Optional
 import asyncio
+import base64
+import os
+
+# Tracks pool IDs currently being warmed to prevent concurrent double-warm
+_pool_warming_in_progress: set[str] = set()
+
+
+async def snap(page, name: str, force: bool = False):
+    from config import DEBUG_SCREENSHOTS, screenshots, logger
+    if not DEBUG_SCREENSHOTS and not force:
+        return
+    try:
+        data = await page.screenshot(type="png", full_page=True)
+        screenshots[name] = base64.b64encode(data).decode()
+        logger.info(f"📸 {name}")
+    except Exception as e:
+        logger.warning(f"Screenshot failed ({name}): {e}")
+
+
+# Alias for WegestSession from config
+from config import WegestSession as WegestSession
 
 
 async def get_or_create_wegest_session(conversation_id: str) -> 'WegestSession':
@@ -32,7 +55,6 @@ async def get_or_create_wegest_session(conversation_id: str) -> 'WegestSession':
         if active_count >= MAX_CONCURRENT_SESSIONS:
             raise Exception(f"Maximum concurrent live sessions reached ({MAX_CONCURRENT_SESSIONS})")
 
-        from config import WegestSession
         session = WegestSession()
         wegest_sessions[conversation_id] = session
         logger.info(f"🆕 Created Wegest session for {conversation_id}")
@@ -92,48 +114,15 @@ async def is_wegest_session_alive(conversation_id: str) -> bool:
             };
         }""")
 
-        # Session is valid only if login is NOT visible
-        # and the app shell/menu or agenda button exists
         return (
             not state.get("loginVisible", False)
             and (state.get("hasAgendaButton", False) or state.get("hasMenu", False))
         )
-
     except Exception:
         return False
 
 
-async def get_assigned_pool_session(conversation_id: str) -> Optional['WegestPoolSession']:
-    async with pool_lock:
-        pool_id = conversation_to_pool_session.get(conversation_id)
-        if not pool_id:
-            return None
-        from config import WegestPoolSession
-        return wegest_pool.get(pool_id)
-
-
-async def assign_idle_pool_session_to_conversation(conversation_id: str) -> 'WegestPoolSession':
-    async with pool_lock:
-        # If already assigned, return existing
-        existing_pool_id = conversation_to_pool_session.get(conversation_id)
-        if existing_pool_id and existing_pool_id in wegest_pool:
-            return wegest_pool[existing_pool_id]
-
-        # Find idle session
-        for pool_id, session in wegest_pool.items():
-            if not session.in_use:
-                session.in_use = True
-                session.assigned_conversation_id = conversation_id
-                session.last_used_at = datetime.utcnow()
-                conversation_to_pool_session[conversation_id] = pool_id
-                logger.info(f"🔗 Assigned {pool_id} to conversation {conversation_id}")
-                return session
-
-    raise Exception("No warm session available in pool")
-
-
 async def ensure_wegest_browser(conversation_id: str):
-    from config import WegestSession
     session = await get_or_create_wegest_session(conversation_id)
 
     if session.page and not session.page.is_closed():
@@ -219,191 +208,6 @@ async def ensure_wegest_logged_in(conversation_id: str):
     return session
 
 
-async def ensure_wegest_agenda_open(conversation_id: str):
-    session = await ensure_wegest_logged_in(conversation_id)
-    page = session.page
-
-    agenda_visible = await page.evaluate("""() => {
-        const a = document.getElementById('pannello_agenda');
-        return a ? getComputedStyle(a).display !== 'none' : false;
-    }""")
-
-    if agenda_visible:
-        session.agenda_open = True
-        session.last_used_at = datetime.utcnow()
-        logger.info(f"📅 Agenda already open for {conversation_id}")
-        from catalog import update_operator_catalog_from_page
-        await update_operator_catalog_from_page(page)
-        return session
-
-    agenda_button_exists = await page.evaluate("""() => {
-        return !!document.querySelector("[pannello='pannello_agenda']");
-    }""")
-
-    if not agenda_button_exists:
-        logger.warning(f"Agenda button not found for {conversation_id}, resetting session...")
-        await reset_wegest_session(conversation_id)
-        session = await ensure_wegest_logged_in(conversation_id)
-        page = session.page
-
-    logger.info(f"📅 Opening agenda in existing session for {conversation_id}...")
-    await page.click("[pannello='pannello_agenda']")
-    await page.wait_for_timeout(5000)
-    await dismiss_system_modals(page, "after-agenda")
-    await page.wait_for_timeout(2000)
-
-    session.agenda_open = True
-    session.last_used_at = datetime.utcnow()
-    from catalog import update_operator_catalog_from_page
-    await update_operator_catalog_from_page(page)
-
-    return session
-
-
-async def reset_pool_session(pool_id: str):
-    async with pool_lock:
-        session = wegest_pool.get(pool_id)
-        if not session:
-            return
-
-    try:
-        if session.page:
-            await session.page.close()
-    except Exception:
-        pass
-    try:
-        if session.context:
-            await session.context.close()
-    except Exception:
-        pass
-    try:
-        if session.browser:
-            await session.browser.close()
-    except Exception:
-        pass
-    try:
-        if session.playwright:
-            await session.playwright.stop()
-    except Exception:
-        pass
-
-    async with pool_lock:
-        wegest_pool.pop(pool_id, None)
-
-    logger.info(f"♻️ Pool session reset: {pool_id}")
-
-
-async def create_and_warm_pool_session(pool_id: str):
-    from config import WegestPoolSession
-    session = WegestPoolSession(id=pool_id)
-
-    p = await async_playwright().start()
-    browser = await p.chromium.launch(
-        headless=True,
-        args=["--no-sandbox", "--disable-setuid-sandbox", "--disable-dev-shm-usage", "--disable-gpu"]
-    )
-    context = await browser.new_context(
-        viewport={"width": 1280, "height": 900},
-        user_agent="Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 Chrome/120.0.0.0 Safari/537.36"
-    )
-    page = await context.new_page()
-
-    session.playwright = p
-    session.browser = browser
-    session.context = context
-    session.page = page
-    session.last_used_at = datetime.utcnow()
-
-    logger.info(f"🔥 Warming pool session {pool_id}...")
-
-    await page.goto(LOGIN_URL, wait_until="networkidle", timeout=60000)
-    await page.wait_for_timeout(5000)
-
-    await page.fill("input[name='username']", WEGEST_USER)
-    await page.fill("input[name='password']", WEGEST_PASSWORD)
-    await page.evaluate("document.querySelector('input[name=\"codice\"]').value = '1'")
-
-    await page.click("div.button")
-
-    try:
-        await page.wait_for_function(
-            """() => {
-                const lp = document.getElementById('pannello_login');
-                return lp && getComputedStyle(lp).display === 'none';
-            }""",
-            timeout=60000
-        )
-    except Exception:
-        pass
-
-    await page.wait_for_timeout(30000)
-
-    login_visible = await page.evaluate("""() => {
-        const el = document.getElementById('pannello_login');
-        return el ? getComputedStyle(el).display !== 'none' : false;
-    }""")
-    if login_visible:
-        raise Exception(f"Pool session {pool_id} login failed")
-
-    session.logged_in = True
-    logger.info(f"✅ Pool session {pool_id} logged in")
-
-    await dismiss_system_modals(page, "post-login")
-    await page.wait_for_timeout(2000)
-
-    await page.click("[pannello='pannello_agenda']")
-    await page.wait_for_timeout(5000)
-    await dismiss_system_modals(page, "after-agenda")
-    await page.wait_for_timeout(2000)
-
-    session.agenda_open = True
-    logger.info(f"📅 Pool session {pool_id} agenda ready")
-
-    async with pool_lock:
-        wegest_pool[pool_id] = session
-
-
-async def get_live_session_for_conversation(conversation_id: str):
-    session = await get_assigned_pool_session(conversation_id)
-    if session:
-        return session
-
-    # Fallback: assign one now if available
-    return await assign_idle_pool_session_to_conversation(conversation_id)
-
-
-async def warm_pool_on_startup():
-    await asyncio.sleep(5)
-
-    for i in range(POOL_SIZE):
-        pool_id = f"pool_{i+1}"
-        try:
-            await create_and_warm_pool_session(pool_id)
-        except Exception as e:
-            logger.warning(f"Failed to warm {pool_id}: {e}")
-
-
-async def cleanup_idle_wegest_sessions():
-    now = datetime.utcnow()
-    to_remove = []
-
-    async with wegest_sessions_lock:
-        items = list(wegest_sessions.items())
-
-    for conversation_id, session in items:
-        if not session.last_used_at:
-            continue
-        age = (now - session.last_used_at).total_seconds()
-        if age > SESSION_IDLE_TTL_SECONDS:
-            to_remove.append(conversation_id)
-
-    for conversation_id in to_remove:
-        await reset_wegest_session(conversation_id)
-
-    if to_remove:
-        logger.info(f"🧹 Cleaned {len(to_remove)} idle Wegest sessions")
-
-
 async def dismiss_system_modals(page, label=""):
     logger.info(f"🔍 Modal sweep: {label}")
     for attempt in range(5):
@@ -447,73 +251,236 @@ async def dismiss_system_modals(page, label=""):
     """)
 
 
-async def snap(page, name: str, force: bool = False):
-    if not config.DEBUG_SCREENSHOTS and not force:
-        return
+async def get_assigned_pool_session(conversation_id: str) -> Optional['WegestPoolSession']:
+    async with pool_lock:
+        pool_id = conversation_to_pool_session.get(conversation_id)
+        if not pool_id:
+            return None
+        return wegest_pool.get(pool_id)
+
+
+async def assign_idle_pool_session_to_conversation(conversation_id: str) -> 'WegestPoolSession':
+    async with pool_lock:
+        # If already assigned, return existing
+        existing_pool_id = conversation_to_pool_session.get(conversation_id)
+        if existing_pool_id and existing_pool_id in wegest_pool:
+            return wegest_pool[existing_pool_id]
+
+        # Find idle session
+        for pool_id, session in wegest_pool.items():
+            if not session.in_use:
+                session.in_use = True
+                session.assigned_conversation_id = conversation_id
+                session.last_used_at = datetime.utcnow()
+                conversation_to_pool_session[conversation_id] = pool_id
+                logger.info(f"🔗 Assigned {pool_id} to conversation {conversation_id}")
+                return session
+
+    raise Exception("No warm session available in pool")
+
+
+async def reset_pool_session(pool_id: str):
+    async with pool_lock:
+        session = wegest_pool.get(pool_id)
+        if not session:
+            return
+
     try:
-        data = await page.screenshot(type="png", full_page=True)
-        config.screenshots[name] = base64.b64encode(data).decode()
-        config.logger.info(f"📸 {name}")
-    except Exception as e:
-        config.logger.warning(f"Screenshot failed ({name}): {e}")
+        if session.page:
+            await session.page.close()
+    except Exception:
+        pass
+    try:
+        if session.context:
+            await session.context.close()
+    except Exception:
+        pass
+    try:
+        if session.browser:
+            await session.browser.close()
+    except Exception:
+        pass
+    try:
+        if session.playwright:
+            await session.playwright.stop()
+    except Exception:
+        pass
+
+    async with pool_lock:
+        wegest_pool.pop(pool_id, None)
+
+    logger.info(f"♻️ Pool session reset: {pool_id}")
+
+
+async def create_and_warm_pool_session(pool_id: str):
+    if pool_id in _pool_warming_in_progress:
+        logger.debug(f"⏩ Skipping {pool_id}: already warming")
+        return
+    _pool_warming_in_progress.add(pool_id)
+    try:
+        await _do_create_and_warm_pool_session(pool_id)
+    finally:
+        _pool_warming_in_progress.discard(pool_id)
+
+
+async def _do_create_and_warm_pool_session(pool_id: str):
+    from config import WegestPoolSession
+    session = WegestPoolSession(id=pool_id)
+
+    p = await async_playwright().start()
+    browser = await p.chromium.launch(
+        headless=True,
+        args=["--no-sandbox", "--disable-setuid-sandbox", "--disable-dev-shm-usage", "--disable-gpu"]
+    )
+    context = await browser.new_context(
+        viewport={"width": 1280, "height": 900},
+        user_agent="Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 Chrome/120.0.0.0 Safari/537.36"
+    )
+    page = await context.new_page()
+
+    session.playwright = p
+    session.browser = browser
+    session.context = context
+    session.page = page
+    session.last_used_at = datetime.utcnow()
+
+    logger.info(f"🔥 Warming pool session {pool_id}...")
+
+    try:
+        await page.goto(LOGIN_URL, wait_until="networkidle", timeout=60000)
+        await page.wait_for_timeout(5000)
+
+        await page.fill("input[name='username']", WEGEST_USER)
+        await page.fill("input[name='password']", WEGEST_PASSWORD)
+        await page.evaluate("document.querySelector('input[name=\"codice\"]').value = '1'")
+
+        await page.click("div.button")
+
+        try:
+            await page.wait_for_function(
+                """() => {
+                    const lp = document.getElementById('pannello_login');
+                    return lp && getComputedStyle(lp).display === 'none';
+                }""",
+                timeout=60000
+            )
+        except Exception:
+            pass
+
+        await page.wait_for_timeout(30000)
+
+        login_visible = await page.evaluate("""() => {
+            const el = document.getElementById('pannello_login');
+            return el ? getComputedStyle(el).display !== 'none' : false;
+        }""")
+        if login_visible:
+            raise Exception(f"Pool session {pool_id} login failed")
+    except Exception:
+        # Clean up browser resources before re-raising so we don't leak them
+        for closer in (page.close, context.close, browser.close, p.stop):
+            try:
+                await closer()
+            except Exception:
+                pass
+        raise
+
+    session.logged_in = True
+    logger.info(f"✅ Pool session {pool_id} logged in")
+
+    await dismiss_system_modals(page, "post-login")
+    await page.wait_for_timeout(2000)
+
+    await page.click("[pannello='pannello_agenda']")
+    await page.wait_for_timeout(5000)
+    await dismiss_system_modals(page, "after-agenda")
+    await page.wait_for_timeout(2000)
+
+    session.agenda_open = True
+    logger.info(f"📅 Pool session {pool_id} agenda ready")
+
+    async with pool_lock:
+        wegest_pool[pool_id] = session
+
+
+async def warm_pool_on_startup():
+    await asyncio.sleep(5)
+
+    for i in range(POOL_SIZE):
+        pool_id = f"pool_{i+1}"
+        try:
+            await create_and_warm_pool_session(pool_id)
+        except Exception as e:
+            logger.warning(f"Failed to warm {pool_id}: {e}")
 
 
 async def ensure_pool_healthy():
-    """
-    Background task that ensures the pool always has warm sessions ready.
-    Runs continuously and replenishes any missing/died sessions.
-    """
+    # Backoff state: after consecutive login failures, wait progressively longer
+    # before retrying to avoid account lockout from repeated failed attempts.
+    consecutive_failures = 0
+    backoff_seconds = 60  # starts at 1 min, doubles up to 30 min
+
     while True:
         try:
-            await asyncio.sleep(60)  # Check every minute.
-
-            # Collect sessions that need resetting (without holding lock during reset)
-            to_reset = []
-            to_create = []
-
             async with pool_lock:
-                # Check which pool slots are missing or unhealthy
-                for i in range(POOL_SIZE):
-                    pool_id = f"pool_{i+1}"
-                    session = wegest_pool.get(pool_id)
+                warm_count = 0
+                for pool_id, session in wegest_pool.items():
+                    if session.page and not session.page.is_closed():
+                        warm_count += 1
 
-                    if not session:
-                        to_create.append(pool_id)
-                        continue
+            if warm_count < POOL_SIZE:
+                logger.warning(f"⚠️ Pool under capacity: {warm_count}/{POOL_SIZE}")
+                any_failure = False
+                for i in range(1, POOL_SIZE + 1):
+                    pool_id = f"pool_{i}"
+                    if pool_id not in wegest_pool:
+                        try:
+                            await create_and_warm_pool_session(pool_id)
+                            consecutive_failures = 0
+                            backoff_seconds = 60
+                        except Exception as e:
+                            logger.error(f"❌ Failed to replenish {pool_id}: {e}")
+                            any_failure = True
 
-                    # Quick check: is page alive?
-                    if not session.page or session.page.is_closed():
-                        to_reset.append(pool_id)
-                        continue
-
-                    # Session exists and page is open, verify it's still healthy
-                    # (but don't do heavy checks here to avoid holding lock)
-                    # We'll do detailed check outside the lock
-
-            # Now reset unhealthy sessions (without holding pool_lock)
-            for pool_id in to_reset:
-                logger.warning(f"Pool {pool_id} needs reset, recycling...")
-                await reset_pool_session(pool_id)
-                to_create.append(pool_id)
-
-            # Create new sessions for any missing/reset slots
-            for pool_id in to_create:
-                try:
-                    logger.info(f"🔥 Replenishing pool session: {pool_id}")
-                    await create_and_warm_pool_session(pool_id)
-                except Exception as e:
-                    logger.error(f"Failed to replenish {pool_id}: {e}")
-
-            # Final check: verify all sessions are healthy
-            async with pool_lock:
-                active_count = sum(
-                    1 for s in wegest_pool.values()
-                    if s.page and not s.page.is_closed()
-                )
-
-            if active_count < POOL_SIZE:
-                logger.warning(f"⚠️ Pool still under capacity: {active_count}/{POOL_SIZE}")
-
+                if any_failure:
+                    consecutive_failures += 1
+                    backoff_seconds = min(backoff_seconds * 2, 1800)  # max 30 min
+                    logger.warning(f"⚠️ Login failures: {consecutive_failures}, next retry in {backoff_seconds}s")
+                    await asyncio.sleep(backoff_seconds)
+                    continue
+            else:
+                consecutive_failures = 0
+                backoff_seconds = 60
         except Exception as e:
-            logger.error(f"Pool health monitor error: {e}")
-            await asyncio.sleep(60)
+            logger.error(f"❌ Pool health check failed: {e}")
+
+        await asyncio.sleep(60)
+
+
+async def get_live_session_for_conversation(conversation_id: str):
+    session = await get_assigned_pool_session(conversation_id)
+    if session:
+        return session
+
+    # Fallback: assign one now if available
+    return await assign_idle_pool_session_to_conversation(conversation_id)
+
+
+async def cleanup_idle_wegest_sessions():
+    now = datetime.utcnow()
+    to_remove = []
+
+    async with wegest_sessions_lock:
+        items = list(wegest_sessions.items())
+
+    for conversation_id, session in items:
+        if not session.last_used_at:
+            continue
+        age = (now - session.last_used_at).total_seconds()
+        if age > SESSION_IDLE_TTL_SECONDS:
+            to_remove.append(conversation_id)
+
+    for conversation_id in to_remove:
+        await reset_wegest_session(conversation_id)
+
+    if to_remove:
+        logger.info(f"🧹 Cleaned {len(to_remove)} idle Wegest sessions")

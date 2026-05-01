@@ -346,18 +346,22 @@ async def _do_create_and_warm_pool_session(pool_id: str):
 
     logger.info(f"🔥 Warming pool session {pool_id}...")
 
-    try:
-        await page.goto(LOGIN_URL, wait_until="networkidle", timeout=60000)
-        await page.wait_for_timeout(5000)
+    async def do_login(pg, ctx):
+        # Clear all cookies and storage to avoid stale session lockout
+        await ctx.clear_cookies()
+        await ctx.clear_permissions()
 
-        await page.fill("input[name='username']", WEGEST_USER)
-        await page.fill("input[name='password']", WEGEST_PASSWORD)
-        await page.evaluate("document.querySelector('input[name=\"codice\"]').value = '1'")
+        await pg.goto(LOGIN_URL, wait_until="networkidle", timeout=60000)
+        await pg.wait_for_timeout(5000)
 
-        await page.click("div.button")
+        await pg.fill("input[name='username']", WEGEST_USER)
+        await pg.fill("input[name='password']", WEGEST_PASSWORD)
+        await pg.evaluate("document.querySelector('input[name=\"codice\"]').value = '1'")
+
+        await pg.click("div.button")
 
         try:
-            await page.wait_for_function(
+            await pg.wait_for_function(
                 """() => {
                     const lp = document.getElementById('pannello_login');
                     return lp && getComputedStyle(lp).display === 'none';
@@ -367,22 +371,54 @@ async def _do_create_and_warm_pool_session(pool_id: str):
         except Exception:
             pass
 
-        await page.wait_for_timeout(30000)
+        await pg.wait_for_timeout(30000)
 
-        login_visible = await page.evaluate("""() => {
+        login_visible = await pg.evaluate("""() => {
             const el = document.getElementById('pannello_login');
             return el ? getComputedStyle(el).display !== 'none' : false;
         }""")
         if login_visible:
+            # Check if it's a lockout error
+            error_text = await pg.evaluate("""() => {
+                const p = document.getElementById('pannello_login');
+                return p ? p.textContent.trim() : '';
+            }""")
+            if 'Errore di accesso' in error_text:
+                raise Exception(f"Pool session {pool_id} login failed - account locked (contact Wegest support)")
             raise Exception(f"Pool session {pool_id} login failed")
-    except Exception:
-        # Clean up browser resources before re-raising so we don't leak them
-        for closer in (page.close, context.close, browser.close, p.stop):
+        return True
+
+    try:
+        await do_login(page, context)
+    except Exception as e:
+        # Retry once with a completely fresh browser context
+        if "locked" not in str(e).lower():
+            logger.warning(f"Retrying {pool_id} with fresh context...")
             try:
-                await closer()
+                await page.close()
+                await context.close()
+                context = await browser.new_context(
+                    viewport={"width": 1280, "height": 900},
+                    user_agent="Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 Chrome/120.0.0.0 Safari/537.36"
+                )
+                page = await context.new_page()
+                session.context = context
+                session.page = page
+                await do_login(page, context)
             except Exception:
-                pass
-        raise
+                for closer in (page.close, context.close, browser.close, p.stop):
+                    try:
+                        await closer()
+                    except Exception:
+                        pass
+                raise
+        else:
+            for closer in (page.close, context.close, browser.close, p.stop):
+                try:
+                    await closer()
+                except Exception:
+                    pass
+            raise
 
     session.logged_in = True
     logger.info(f"✅ Pool session {pool_id} logged in")

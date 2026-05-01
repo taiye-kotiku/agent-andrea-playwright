@@ -39,3 +39,4 @@ logs/
 # Testing
 # (keep tests and pytest.ini in repo)
 
+uvicorn.log

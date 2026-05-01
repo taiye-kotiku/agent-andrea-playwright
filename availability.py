@@ -98,7 +98,9 @@ async def run_availability_check(request: 'AvailabilityRequest') -> dict:
         for op in cached.get("operators", []):
             name = op.get("name", "")
 
-            if operator_pref != "prima disponibile":
+            is_any_pref = operator_pref in ("prima disponibile", "any", "anyone", "any available", "any available stylist", "any stylist", "chiunque", "indifferente")
+
+            if not is_any_pref:
                 if operator_pref not in name.lower().strip():
                     continue
 

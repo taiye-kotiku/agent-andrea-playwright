@@ -243,7 +243,9 @@ async def update_booking_context_endpoint(request: Request, payload: UpdateBooki
         updates["services"] = normalized_services
 
     if payload.operator_preference is not None:
-        updates["operator_preference"] = payload.operator_preference
+        op_pref = payload.operator_preference.lower().strip()
+        any_vals = {"prima disponibile", "any", "anyone", "any available", "any available stylist", "any stylist", "chiunque", "indifferente"}
+        updates["operator_preference"] = "prima disponibile" if op_pref in any_vals else payload.operator_preference
 
     if payload.preferred_date is not None:
         from utils import normalize_date_to_iso

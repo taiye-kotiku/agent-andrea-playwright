@@ -378,8 +378,10 @@ async def scrape_day_availability_from_page(
         op_id = op["id"]
         name = op_names.get(op_id, f"Operatore_{op_id}")
 
-        if operator_preference.lower() != "prima disponibile":
-            op_pref = operator_preference.lower().strip()
+        op_pref = operator_preference.lower().strip()
+        is_any_pref = op_pref in ("prima disponibile", "any", "anyone", "any available", "any available stylist", "any stylist", "chiunque", "indifferente")
+
+        if not is_any_pref:
             if op_pref not in name.lower().strip():
                 continue
 

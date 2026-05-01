@@ -6,6 +6,7 @@ import config
 from datetime import datetime
 from config import logger, service_catalog, SERVICE_DURATION_FALLBACK
 from playwright.async_api import async_playwright
+from session_manager import dismiss_system_modals
 from typing import Any, Optional
 
 

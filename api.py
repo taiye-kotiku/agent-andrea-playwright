@@ -6,24 +6,6 @@ from fastapi import FastAPI, HTTPException, Request
 from fastapi.responses import HTMLResponse
 import config
 from config import app, API_SECRET, DEBUG_SCREENSHOTS, screenshots, logger
-from starlette.responses import JSONResponse
-from starlette.requests import Request as StarletteRequest
-import traceback
-
-@app.exception_handler(Exception)
-async def global_exception_handler(request: Request, exc: Exception):
-    logger.error(f"❌ Unhandled exception: {exc}")
-    logger.error(traceback.format_exc())
-    return JSONResponse(
-        status_code=200,  # Return 200 with error details instead of 500
-        content={
-            "success": False,
-            "error": str(exc),
-            "traceback": traceback.format_exc(),
-            "message": f"Error: {exc}",
-            "next_action": "retry_or_apologize"
-        }
-    )
 from api_models import (
     BookingRequest,
     UpdateBookingContextRequest,
@@ -37,7 +19,7 @@ from api_models import (
 from booking import run_wegest_booking
 from availability import run_availability_check
 from utils import normalize_requested_services, get_missing_booking_fields, load_cache_from_disk
-from session_manager import snap, warm_pool_on_startup, cleanup_idle_wegest_sessions, dismiss_system_modals, ensure_pool_healthy
+from session_manager import snap, warm_pool_on_startup, cleanup_idle_wegest_sessions, dismiss_system_modals
 from utils import cleanup_expired_call_states
 from catalog import extract_service_operator_durations_from_page
 from datetime import datetime
@@ -628,7 +610,6 @@ async def startup_event():
     asyncio.create_task(cleanup_call_states_forever())
     asyncio.create_task(cleanup_wegest_sessions_forever())
     asyncio.create_task(warm_pool_on_startup())
-    asyncio.create_task(ensure_pool_healthy())
     logger.info("🚀 App started (background refresh disabled, warm pool starting)")
 
 

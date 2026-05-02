@@ -28,6 +28,10 @@ import base64
 import asyncio
 
 
+@app.get("/")
+async def root():
+    return {"status": "ok", "service": "Agent Andrea Wegest Booking"}
+
 @app.get("/health")
 async def health():
     return {"status": "ok", "service": "Agent Andrea Wegest Booking"}

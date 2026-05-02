@@ -41,8 +41,9 @@ async def snap(page, name: str, force: bool = False):
         logger.warning(f"Screenshot failed ({name}): {e}")
 
 
-# Alias for WegestSession from config
+# Alias for WegestSession and WegestPoolSession from config
 from config import WegestSession as WegestSession
+from config import WegestPoolSession as WegestPoolSession
 
 
 async def get_or_create_wegest_session(conversation_id: str) -> 'WegestSession':

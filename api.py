@@ -528,7 +528,20 @@ async def prepare_live_session_endpoint(request: Request, payload: PrepareLiveSe
         raise HTTPException(status_code=400, detail="conversation_id required")
 
     try:
-        session = await assign_idle_pool_session_to_conversation(payload.conversation_id)
+        try:
+            session = await assign_idle_pool_session_to_conversation(payload.conversation_id)
+        except Exception:
+            logger.info("🔥 No warm session in pool, warming on-demand...")
+            from session_manager import create_and_warm_pool_session, wegest_pool, pool_lock, POOL_SIZE
+            async with pool_lock:
+                for i in range(1, POOL_SIZE + 1):
+                    pool_id = f"pool_{i}"
+                    if pool_id not in wegest_pool:
+                        await create_and_warm_pool_session(pool_id)
+                        break
+                else:
+                    await create_and_warm_pool_session("pool_1")
+            session = await assign_idle_pool_session_to_conversation(payload.conversation_id)
 
         async with session.lock:
             # Verify still alive

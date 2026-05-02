@@ -93,7 +93,7 @@ SESSION_IDLE_TTL_SECONDS = 60 * 15  # 15 minutes
 wegest_pool: dict[str, 'WegestPoolSession'] = {}
 conversation_to_pool_session: dict[str, str] = {}
 
-POOL_SIZE = 2
+POOL_SIZE = 1
 
 operator_catalog = {
     "updated_at": None,

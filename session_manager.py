@@ -135,10 +135,21 @@ async def ensure_wegest_browser(conversation_id: str):
     p = await async_playwright().start()
     browser = await p.chromium.launch(
         headless=True,
-        args=["--no-sandbox", "--disable-setuid-sandbox", "--disable-dev-shm-usage", "--disable-gpu"]
+        args=[
+            "--no-sandbox",
+            "--disable-setuid-sandbox",
+            "--disable-dev-shm-usage",
+            "--disable-gpu",
+            "--disable-background-timer-throttling",
+            "--disable-renderer-backgrounding",
+            "--disable-extensions",
+            "--single-process",
+            "--disable-web-security",
+            "--js-flags=--max-old-space-size=128"
+        ]
     )
     context = await browser.new_context(
-        viewport={"width": 1280, "height": 900},
+        viewport={"width": 1024, "height": 768},
         user_agent="Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 Chrome/120.0.0.0 Safari/537.36"
     )
     page = await context.new_page()
@@ -323,10 +334,21 @@ async def create_and_warm_pool_session(pool_id: str):
     p = await async_playwright().start()
     browser = await p.chromium.launch(
         headless=True,
-        args=["--no-sandbox", "--disable-setuid-sandbox", "--disable-dev-shm-usage", "--disable-gpu"]
+        args=[
+            "--no-sandbox",
+            "--disable-setuid-sandbox",
+            "--disable-dev-shm-usage",
+            "--disable-gpu",
+            "--disable-background-timer-throttling",
+            "--disable-renderer-backgrounding",
+            "--disable-extensions",
+            "--single-process",
+            "--disable-web-security",
+            "--js-flags=--max-old-space-size=128"
+        ]
     )
     context = await browser.new_context(
-        viewport={"width": 1280, "height": 900},
+        viewport={"width": 1024, "height": 768},
         user_agent="Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 Chrome/120.0.0.0 Safari/537.36"
     )
     page = await context.new_page()

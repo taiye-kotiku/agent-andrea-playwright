@@ -204,7 +204,7 @@ async def advance_booking_endpoint(request: Request):
         # Dump HTML for debugging
         try:
             if session and session.page:
-                await dump_html(session.page, f"advance_booking_error_{conversation_id}", force=True)
+                await dump_html(session.page, f"advance_booking_error_{conversation_id}")
         except Exception:
             pass
         return {
@@ -660,11 +660,10 @@ async def check_booking_options_endpoint(request: Request, payload: CheckBooking
         }
     except Exception as e:
         logger.error(f"❌ Error in check_booking_options: {e}")
-        # Try to dump HTML for debugging
+        # Dump HTML for debugging
         try:
-            session = await get_assigned_pool_session(payload.conversation_id)
-            if session:
-                await dump_html(session.page, f"check_options_error_{payload.conversation_id}", force=True)
+            if session and session.page:
+                await dump_html(session.page, f"check_options_error_{payload.conversation_id}")
         except Exception:
             pass
         return {

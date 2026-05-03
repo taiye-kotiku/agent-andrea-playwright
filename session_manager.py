@@ -42,10 +42,8 @@ async def snap(page, name: str, force: bool = False):
 
 
 async def dump_html(page, name: str, force: bool = False):
-    """Save HTML dump for debugging."""
-    from config import DEBUG_SCREENSHOTS, html_dumps, logger
-    if not DEBUG_SCREENSHOTS and not force:
-        return
+    """Save HTML dump for debugging - always saves on error even without DEBUG flag."""
+    from config import html_dumps, logger
     try:
         html = await page.content()
         # Truncate to 50KB to avoid storage bloat

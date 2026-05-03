@@ -494,9 +494,9 @@ async def run_wegest_booking(request: 'BookingRequest') -> dict:
                     return {{ visible: true, filled: !!inp, confirmed: false }};
                 }}
             """)
-    if phone_handled and phone_handled.get('visible'):
-        logger.info(f"📱 Phone modal: {phone_handled}")
-        await page.wait_for_timeout(1000)
+            if phone_handled and phone_handled.get('visible'):
+                logger.info(f"📱 Phone modal: {phone_handled}")
+                await page.wait_for_timeout(1000)
             else:
                 logger.info("📱 No phone modal")
 

@@ -76,6 +76,7 @@ booking_lock = asyncio.Lock()
 
 # Global state
 screenshots = {}
+html_dumps = {}
 
 CACHE_FILE = Path("availability_cache.json")
 

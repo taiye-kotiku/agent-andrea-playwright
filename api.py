@@ -6,7 +6,7 @@ from fastapi import FastAPI, HTTPException, Request
 from fastapi.responses import HTMLResponse
 from fastapi.middleware.gzip import GZipMiddleware
 import config
-from config import app, API_SECRET, DEBUG_SCREENSHOTS, screenshots, logger, booking_lock
+from config import app, API_SECRET, DEBUG_SCREENSHOTS, screenshots, html_dumps, logger, booking_lock
 
 app.add_middleware(GZipMiddleware, minimum_size=1000)
 from api_models import (
@@ -111,10 +111,10 @@ async def advance_booking_endpoint(request: Request):
             state = await get_call_state(conversation_id)
 
             # Build booking state from stored context
-            phone = state.get("caller_phone", "")
-            if phone.startswith("+39"):
+            phone = state.get("caller_phone") or ""
+            if phone and phone.startswith("+39"):
                 phone = phone[3:]
-            elif phone.startswith("0039"):
+            elif phone and phone.startswith("0039"):
                 phone = phone[4:]
 
             new_state = BookingState(
@@ -220,6 +220,26 @@ async def view_screenshots():
         html += f"<img src='data:image/png;base64,{data}' style='max-width:100%;border:2px solid #555;margin-bottom:30px;display:block'><br>"
     html += "</body></html>"
     return html
+
+
+@app.get("/html-dumps", response_class=HTMLResponse)
+async def view_html_dumps():
+    if not html_dumps:
+        return "<h2>No HTML dumps yet</h2>"
+    html = "<html><body style='background:#111;color:#fff;font-family:monospace;padding:20px'>"
+    html += "<h1>📄 HTML Dumps</h1>"
+    for name, data in html_dumps.items():
+        html += f"<h3>📄 {name}</h3>"
+        html += f"<pre style='background:#222;padding:15px;overflow-x:auto;white-space:pre-wrap;word-wrap:break-word;border:1px solid #555;max-height:400px;overflow-y:scroll'>{data[:50000]}</pre><br>"
+    html += "</body></html>"
+    return html
+
+
+@app.post("/clear-debug")
+async def clear_debug():
+    screenshots.clear()
+    html_dumps.clear()
+    return {"success": True, "message": "Debug data cleared"}
 
 
 @app.post("/book")
@@ -664,10 +684,10 @@ async def finalize_booking_endpoint(request: Request, payload: FinalizeBookingRe
         from session_manager import get_assigned_pool_session
         session = await get_assigned_pool_session(payload.conversation_id)
         if session:
-            phone = state.get("caller_phone", "")
-            if phone.startswith("+39"):
+            phone = state.get("caller_phone") or ""
+            if phone and phone.startswith("+39"):
                 phone = phone[3:]
-            elif phone.startswith("0039"):
+            elif phone and phone.startswith("0039"):
                 phone = phone[4:]
             await sync_booking_context(session, {
                 "date": state.get("preferred_date"),

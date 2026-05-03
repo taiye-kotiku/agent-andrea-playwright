@@ -5,7 +5,7 @@ and advances booking step-by-step as context arrives (live receptionist behavior
 """
 
 import config
-from config import logger, API_SECRET, screenshots, BookingState
+from config import logger, API_SECRET, screenshots, html_dumps, BookingState
 from session_manager import (
     get_live_session_for_conversation,
     adaptive_modal_scan,
@@ -352,11 +352,14 @@ async def advance_to_customer_selected(page, booking_state: BookingState) -> boo
     try:
         await page.wait_for_selector(".cerca_cliente.modale input[name='cerca_cliente']", timeout=10000)
     except Exception:
+        html_content = await page.content()
+        html_dumps["customer_modal_error"] = html_content
+        logger.warning(f"💾 Saved HTML dump to /html-dumps (customer modal error)")
         raise Exception("Customer search modal did not open after time selection")
 
     logger.info(f"🔍 Searching customer: '{booking_state.customer_name}'")
 
-    # Search strategies
+    # Search strategies - always pick first match if any exist
     match_js = f"""
         () => {{
             const first = '{first_safe}';
@@ -367,12 +370,23 @@ async def advance_to_customer_selected(page, booking_state: BookingState) -> boo
                 const p = row.querySelector('p.cliente');
                 if (!p) continue;
                 const text = p.textContent.toLowerCase().trim();
+                const phone = row.querySelector('td span')?.textContent?.trim() || '';
                 results.push({{
                     id: row.id,
                     name: p.textContent.trim(),
                     hasFirst: text.includes(first),
-                    hasLast: last ? text.includes(last) : false
+                    hasLast: last ? text.includes(last) : false,
+                    hasPhone: '{search_phone}' && phone.includes('{search_phone}')
                 }});
+            }}
+            // Priority: phone match > full name > first name > first result
+            if ('{search_phone}') {{
+                for (const r of results) {{
+                    if (r.hasPhone) {{
+                        document.getElementById(r.id).click();
+                        return {{ found: true, id: r.id, name: r.name, method: 'phone' }};
+                    }}
+                }}
             }}
             if (last) {{
                 for (const r of results) {{
@@ -390,7 +404,12 @@ async def advance_to_customer_selected(page, booking_state: BookingState) -> boo
                     }}
                 }}
             }}
-            return {{ found: false, count: results.length, candidates: results.map(r => r.name).slice(0, 5) }};
+            // Fallback: just pick the first result if any exist
+            if (results.length > 0) {{
+                document.getElementById(results[0].id).click();
+                return {{ found: true, id: results[0].id, name: results[0].name, method: 'first_fallback' }};
+            }}
+            return {{ found: false, count: 0 }};
         }}
     """
 

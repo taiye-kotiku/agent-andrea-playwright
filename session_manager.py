@@ -257,7 +257,7 @@ async def dismiss_system_modals(page, label=""):
         await page.wait_for_timeout(1000)
     await page.evaluate("""
         () => {
-            document.querySelectorAll('.modale_overlay, .overlay_modale, .overlay, #modale_sfondo').forEach(el => {
+            document.querySelectorAll('.modale_overlay, .overlay_modale, .overlay, #modale_sfondo, .agenda_modale_sfondo').forEach(el => {
                 if (getComputedStyle(el).display !== 'none') el.style.display = 'none';
             });
         }

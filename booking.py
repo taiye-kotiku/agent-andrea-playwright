@@ -179,6 +179,12 @@ async def advance_to_date_selected(page, booking_state: BookingState) -> bool:
     def _click_date():
         return page.evaluate(f"""
             () => {{
+                // Dismiss overlay first
+                const overlay = document.querySelector('.agenda_modale_sfondo');
+                if (overlay && (overlay.style.display !== 'none' && overlay.style.visibility !== 'hidden')) {{
+                    overlay.style.display = 'none';
+                }}
+
                 const sel = ".data[giorno='{day}'][mese='{month}'][anno='{year}']";
                 const el = document.querySelector(sel);
                 if (!el) return {{ ok: false, reason: 'not_found' }};
@@ -252,19 +258,36 @@ async def advance_to_time_selected(page, booking_state: BookingState) -> bool:
     def _try_click(op_id=None, h=None, m=None):
         h = h or hour
         m = m or minute
-        base = f".cella[giorno='{day}'][mese='{month}'][anno='{year}'][ora='{h}'][minuto='{m}']"
-        if op_id:
-            base += f"[id_operatore='{op_id}']"
-        base += ":not(.assente)"
         return f"""
             () => {{
-                const cell = document.querySelector("{base}");
-                if (!cell) {{
-                    // Debug: find what's actually available
-                    const all = document.querySelectorAll(".cella[giorno='{day}'][mese='{month}'][anno='{year}'][ora='{h}']");
-                    const available = Array.from(all).filter(c => !c.classList.contains('assente'));
-                    return {{ ok: false, reason: 'not_found', selector: "{base}", available_count: available.length, debug: available.map(c => c.getAttribute('id_operatore') + ':' + c.getAttribute('minuto')).join(',') }};
+                // Dismiss overlay first
+                const overlay = document.querySelector('.agenda_modale_sfondo');
+                if (overlay && (overlay.style.display !== 'none' && overlay.style.visibility !== 'hidden')) {{
+                    overlay.style.display = 'none';
                 }}
+
+                // Find cell in operator column - use correct attribute format
+                const baseSelector = ".cella[ora=\\"" + "{h}" + "\\"][minuto=\\"" + "{m}" + "\\"][giorno=\\"" + "{day}" + "\\"][mese=\\"" + "{month}" + "\\"][anno=\\"" + "{year}" + "\\"]";
+                let cell = null;
+                
+                // If operator specified, find in their column
+                if ("{op_id}") {{
+                    const opCol = document.querySelector(".operatore_orari.presente[id_operatore=\\"" + "{op_id}" + "\\"]");
+                    if (opCol) {{
+                        cell = opCol.querySelector(".cella[ora=\\"" + "{h}" + "\\"][minuto=\\"" + "{m}" + "\\"]");
+                    }}
+                }} else {{
+                    // Find ANY available cell for this time
+                    const allCells = document.querySelectorAll(baseSelector + ":not(.assente)");
+                    cell = allCells.length > 0 ? allCells[0] : null;
+                }}
+                
+                if (!cell) {{
+                    // Debug: check what's available
+                    const hourCells = document.querySelectorAll(".cella[ora=\\"" + "{h}" + "\\"][giorno=\\"" + "{day}" + "\\"][mese=\\"" + "{month}" + "\\"]:not(.assente)");
+                    return {{ ok: false, reason: 'not_found', available_count: hourCells.length }};
+                }}
+                
                 cell.click();
                 return {{ ok: true, op: cell.getAttribute('id_operatore'), minuto: cell.getAttribute('minuto') }};
             }}

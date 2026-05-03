@@ -302,8 +302,11 @@ async def advance_to_time_selected(page, booking_state: BookingState) -> bool:
                     break
     else:
         # Prima disponibile
+        last_result = None
         for m_try in [minute, "0", "15", "30", "45"]:
             result, _ = await safe_action(page, lambda m=m_try: page.evaluate(_try_click(m=m)), f"click-time-{hour}:{m_try}")
+            last_result = result
+            logger.info(f" Trying minute {m_try}: result={result}")
             if result and result.get("ok"):
                 clicked = True
                 actual_time = f"{hour}:{result.get('minuto', m_try)}"
@@ -313,6 +316,7 @@ async def advance_to_time_selected(page, booking_state: BookingState) -> bool:
         if not clicked:
             for try_hour in range(raw_hour + 1, 20):
                 result, _ = await safe_action(page, lambda h=str(try_hour): page.evaluate(_try_click(h=h)), f"click-time-{try_hour}")
+                last_result = result
                 if result and result.get("ok"):
                     clicked = True
                     actual_time = f"{try_hour}:{result.get('minuto', '0')}"
@@ -320,6 +324,7 @@ async def advance_to_time_selected(page, booking_state: BookingState) -> bool:
                     break
 
     if not clicked:
+        logger.error(f"❌ Time click failed - hour={hour}, minute={minute}, last_result={last_result}")
         raise Exception(f"No available time slot on {booking_state.booked_date}")
 
     booking_state.booked_time = actual_time

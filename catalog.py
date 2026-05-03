@@ -160,15 +160,6 @@ async def scrape_day_availability_from_page(
             "operators": []
         }
 
-    # Clear any blocking overlay before clicking date
-    await page.evaluate("""
-        () => {
-            document.querySelectorAll('.modale_overlay, .overlay_modale, .overlay, #modale_sfondo, .agenda_modale_sfondo').forEach(el => {
-                if (getComputedStyle(el).display !== 'none') el.style.display = 'none';
-            });
-        }
-    """)
-
     await page.click(date_selector, timeout=10000)
 
     try:

@@ -658,6 +658,25 @@ async def finalize_booking_endpoint(request: Request, payload: FinalizeBookingRe
         }
 
     async with booking_lock:
+        # Sync context to session before booking (handles changes, resets if needed)
+        from booking import sync_booking_context
+        from session_manager import get_assigned_pool_session
+        session = await get_assigned_pool_session(payload.conversation_id)
+        if session:
+            phone = state.get("caller_phone", "")
+            if phone.startswith("+39"):
+                phone = phone[3:]
+            elif phone.startswith("0039"):
+                phone = phone[4:]
+            await sync_booking_context(session, {
+                "date": state.get("preferred_date"),
+                "time": state.get("preferred_time"),
+                "customer_name": state.get("customer_name"),
+                "customer_phone": phone,
+                "services": state.get("services") or [],
+                "operator_preference": state.get("operator_preference", "prima disponibile")
+            })
+
         booking_request = BookingRequest(
             customer_name=state["customer_name"],
             caller_phone=state["caller_phone"],

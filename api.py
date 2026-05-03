@@ -532,15 +532,26 @@ async def prepare_live_session_endpoint(request: Request, payload: PrepareLiveSe
             session = await assign_idle_pool_session_to_conversation(payload.conversation_id)
         except Exception:
             logger.info("🔥 No warm session in pool, warming on-demand...")
-            from session_manager import create_and_warm_pool_session, wegest_pool, pool_lock, POOL_SIZE
+            from session_manager import create_and_warm_pool_session, wegest_pool, pool_lock, POOL_SIZE, reset_pool_session
             async with pool_lock:
                 for i in range(1, POOL_SIZE + 1):
                     pool_id = f"pool_{i}"
-                    if pool_id not in wegest_pool:
+                    existing = wegest_pool.get(pool_id)
+                    if existing and (not existing.page or existing.page.is_closed()):
+                        await reset_pool_session(pool_id)
+                        await create_and_warm_pool_session(pool_id)
+                        break
+                    elif not existing:
+                        await create_and_warm_pool_session(pool_id)
+                        break
+                    elif existing.assigned_conversation_id != payload.conversation_id:
+                        await reset_pool_session(pool_id)
                         await create_and_warm_pool_session(pool_id)
                         break
                 else:
-                    await create_and_warm_pool_session("pool_1")
+                    pool_id = f"pool_1"
+                    await reset_pool_session(pool_id)
+                    await create_and_warm_pool_session(pool_id)
             session = await assign_idle_pool_session_to_conversation(payload.conversation_id)
 
         async with session.lock:

@@ -40,13 +40,15 @@ async def health():
     return {"status": "ok", "service": "Agent Andrea Wegest Booking"}
 
 
-@app.get("/booking-status")
-async def booking_status(request: Request, conversation_id: str = None):
+@app.post("/booking-status")
+async def booking_status(request: Request):
     """Check the current live booking state for a conversation."""
     auth = request.headers.get("Authorization") or request.headers.get("authorization") or ""
     if auth != f"Bearer {API_SECRET}":
         raise HTTPException(status_code=401, detail="Unauthorized")
 
+    body = await request.json()
+    conversation_id = body.get("conversation_id")
     if not conversation_id:
         raise HTTPException(status_code=400, detail="conversation_id required")
 

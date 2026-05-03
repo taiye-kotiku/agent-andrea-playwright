@@ -722,6 +722,23 @@ async def cleanup_idle_wegest_sessions():
         logger.info(f"🧹 Cleaned {len(to_remove)} idle Wegest sessions")
 
 
+async def cleanup_idle_pool_sessions():
+    now = datetime.utcnow()
+    to_reset = []
+
+    async with pool_lock:
+        for pool_id, session in list(wegest_pool.items()):
+            if session.last_used_at and (now - session.last_used_at).total_seconds() > SESSION_IDLE_TTL_SECONDS:
+                if session.assigned_conversation_id and pool_id not in [s for s in conversation_to_pool_session.values()]:
+                    to_reset.append(pool_id)
+
+    for pool_id in to_reset:
+        await reset_pool_session(pool_id)
+
+    if to_reset:
+        logger.info(f"♻️ Cleaned {len(to_reset)} idle pool sessions")
+
+
 async def return_session_to_pool(conversation_id: str):
     """Return a conversation's assigned session to the pool (make it idle again)."""
     async with pool_lock:

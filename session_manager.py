@@ -30,7 +30,7 @@ _pool_warming_in_progress: set[str] = set()
 
 
 async def snap(page, name: str, force: bool = False):
-    from config import DEBUG_SCREENSHOTS, screenshots, logger
+    from config import DEBUG_SCREENSHOTS, screenshots, html_dumps, logger
     if not DEBUG_SCREENSHOTS and not force:
         return
     try:
@@ -39,6 +39,20 @@ async def snap(page, name: str, force: bool = False):
         logger.info(f"📸 {name}")
     except Exception as e:
         logger.warning(f"Screenshot failed ({name}): {e}")
+
+
+async def dump_html(page, name: str, force: bool = False):
+    """Save HTML dump for debugging."""
+    from config import DEBUG_SCREENSHOTS, html_dumps, logger
+    if not DEBUG_SCREENSHOTS and not force:
+        return
+    try:
+        html = await page.content()
+        # Truncate to 50KB to avoid storage bloat
+        html_dumps[name] = html[:50000]
+        logger.info(f"📄 HTML dump: {name}")
+    except Exception as e:
+        logger.warning(f"HTML dump failed ({name}): {e}")
 
 
 # Alias for WegestSession and WegestPoolSession from config

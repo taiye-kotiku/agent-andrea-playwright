@@ -22,7 +22,7 @@ from api_models import (
 from booking import run_wegest_booking
 from availability import run_availability_check
 from utils import normalize_requested_services, get_missing_booking_fields, load_cache_from_disk
-from session_manager import snap, warm_pool_on_startup, cleanup_idle_wegest_sessions, cleanup_idle_pool_sessions, dismiss_system_modals, assign_idle_pool_session_to_conversation, adaptive_modal_scan
+from session_manager import snap, dump_html, warm_pool_on_startup, cleanup_idle_wegest_sessions, cleanup_idle_pool_sessions, dismiss_system_modals, assign_idle_pool_session_to_conversation, adaptive_modal_scan
 from utils import cleanup_expired_call_states
 from catalog import extract_service_operator_durations_from_page
 from datetime import datetime
@@ -201,6 +201,12 @@ async def advance_booking_endpoint(request: Request):
             }
     except Exception as e:
         logger.error(f"❌ /advance-booking error: {e}")
+        # Dump HTML for debugging
+        try:
+            if session and session.page:
+                await dump_html(session.page, f"advance_booking_error_{conversation_id}", force=True)
+        except Exception:
+            pass
         return {
             "success": False,
             "error": str(e),
@@ -490,7 +496,12 @@ async def check_booking_options_endpoint(request: Request, payload: CheckBooking
             raise HTTPException(status_code=401, detail="Unauthorized")
 
         from utils import get_call_state, update_call_state
+        from session_manager import get_assigned_pool_session
         state = await get_call_state(payload.conversation_id)
+        
+        # Get session for potential HTML dump on error
+        session = await get_assigned_pool_session(payload.conversation_id)
+        
         logger.info(f"🔍 State for {payload.conversation_id}: preferred_date={state.get('preferred_date')}, services={state.get('services')}")
 
         services = state.get("services") or []
@@ -649,6 +660,13 @@ async def check_booking_options_endpoint(request: Request, payload: CheckBooking
         }
     except Exception as e:
         logger.error(f"❌ Error in check_booking_options: {e}")
+        # Try to dump HTML for debugging
+        try:
+            session = await get_assigned_pool_session(payload.conversation_id)
+            if session:
+                await dump_html(session.page, f"check_options_error_{payload.conversation_id}", force=True)
+        except Exception:
+            pass
         return {
             "success": False,
             "conversation_id": payload.conversation_id,

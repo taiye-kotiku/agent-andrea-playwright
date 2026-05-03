@@ -255,14 +255,14 @@ async def advance_to_time_selected(page, booking_state: BookingState) -> bool:
         base = f".cella[giorno='{day}'][mese='{month}'][anno='{year}'][ora='{h}'][minuto='{m}']"
         if op_id:
             base += f"[id_operatore='{op_id}']"
-        base += ":not(.assente):not(.occupata)"
+        base += ":not(.assente)"
         return f"""
             () => {{
                 const cell = document.querySelector("{base}");
                 if (!cell) {{
                     // Debug: find what's actually available
                     const all = document.querySelectorAll(".cella[giorno='{day}'][mese='{month}'][anno='{year}'][ora='{h}']");
-                    const available = Array.from(all).filter(c => !c.classList.contains('assente') && !c.classList.contains('occupata'));
+                    const available = Array.from(all).filter(c => !c.classList.contains('assente'));
                     return {{ ok: false, reason: 'not_found', selector: "{base}", available_count: available.length, debug: available.map(c => c.getAttribute('id_operatore') + ':' + c.getAttribute('minuto')).join(',') }};
                 }}
                 cell.click();
@@ -279,7 +279,7 @@ async def advance_to_time_selected(page, booking_state: BookingState) -> bool:
         base = f".cella[giorno='{day}'][mese='{month}'][anno='{year}'][ora='{h}']"
         if op_id:
             base += f"[id_operatore='{op_id}']"
-        base += ":not(.assente):not(.occupata)"
+        base += ":not(.assente)"
         return base
 
     if preferred_op_id:

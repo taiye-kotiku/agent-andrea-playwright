@@ -6,7 +6,7 @@ import config
 from datetime import datetime
 from config import logger, service_catalog, SERVICE_DURATION_FALLBACK
 from playwright.async_api import async_playwright
-from session_manager import dismiss_system_modals
+from session_manager import dismiss_system_modals, adaptive_modal_scan
 from typing import Any, Optional
 
 
@@ -125,7 +125,7 @@ async def scrape_day_availability_from_page(
     config.logger.info(f"Scraping date in existing session: {day}/{month}/{year} ({day_name})")
     config.logger.info(f"Requested services for availability: {requested_services}")
 
-    await dismiss_system_modals(page, "before-date")
+    await adaptive_modal_scan(page, "before-date")
 
     date_selector = f".data[giorno='{day}'][mese='{month}'][anno='{year}']"
 

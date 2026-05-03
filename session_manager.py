@@ -256,9 +256,11 @@ async def dismiss_system_modals(page, label=""):
         logger.info(f"  → {clicked}")
         await page.wait_for_timeout(1000)
     await page.evaluate("""
-        () => document.querySelectorAll('.modale_overlay, .overlay_modale, .overlay').forEach(el => {
-            if (getComputedStyle(el).display !== 'none') el.style.display = 'none';
-        })
+        () => {
+            document.querySelectorAll('.modale_overlay, .overlay_modale, .overlay, #modale_sfondo').forEach(el => {
+                if (getComputedStyle(el).display !== 'none') el.style.display = 'none';
+            });
+        }
     """)
 
 
@@ -332,11 +334,21 @@ async def adaptive_modal_scan(page, label="", auto_dismiss=True):
                 });
             }
 
-            // 5. Generic overlays
-            document.querySelectorAll('.modale_overlay, .overlay_modale, .overlay, .modale').forEach(el => {
+            // 5. Modal backdrop (#modale_sfondo) — blocks clicks
+            const sfondo = document.getElementById('modale_sfondo');
+            if (sfondo && getComputedStyle(sfondo).display !== 'none') {
+                found.push({
+                    selector: '#modale_sfondo',
+                    type: 'modal_backdrop',
+                    text: 'Background overlay blocking clicks',
+                    buttons: []
+                });
+            }
+
+            // 6. Generic overlays — only real overlay containers, NOT Wegest admin UI cards
+            document.querySelectorAll('.modale_overlay, .overlay_modale, .overlay, .sfondo').forEach(el => {
                 if (getComputedStyle(el).display !== 'none') {
                     const sel = el.id ? `#${el.id}` : '.' + Array.from(el.classList).join('.');
-                    // Avoid duplicates
                     if (!found.some(f => f.selector === sel)) {
                         found.push({
                             selector: sel,
@@ -377,11 +389,13 @@ async def adaptive_modal_scan(page, label="", auto_dismiss=True):
         result["modals"].append(modal_entry)
         await page.wait_for_timeout(500)
 
-    # Cleanup any remaining overlays
+    # Cleanup any remaining overlays including modale_sfondo
     await page.evaluate("""
-        () => document.querySelectorAll('.modale_overlay, .overlay_modale, .overlay').forEach(el => {
-            if (getComputedStyle(el).display !== 'none') el.style.display = 'none';
-        })
+        () => {
+            document.querySelectorAll('.modale_overlay, .overlay_modale, .overlay, .sfondo, #modale_sfondo').forEach(el => {
+                if (getComputedStyle(el).display !== 'none') el.style.display = 'none';
+            });
+        }
     """)
 
     return result
@@ -456,6 +470,16 @@ async def _dismiss_specific_modal(page, modal_info):
     # Customer form — just log (handled by booking flow)
     if modal_type == "customer_form":
         return None  # Expected modal
+
+    # Modal backdrop (#modale_sfondo) — force hide, it's just a background
+    if modal_type == "modal_backdrop":
+        await page.evaluate("""
+            () => {
+                const el = document.getElementById('modale_sfondo');
+                if (el) el.style.display = 'none';
+            }
+        """)
+        return "force-hidden-backdrop"
 
     # Generic overlay — force hide
     if modal_type == "generic_overlay":

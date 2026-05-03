@@ -104,52 +104,52 @@ async def advance_booking_endpoint(request: Request):
     if not session:
         return {"success": False, "message": "No live session for this conversation"}
 
-    async with session.lock:
-        # Get current context from call state
-        from utils import get_call_state
-        state = await get_call_state(conversation_id)
+    try:
+        async with session.lock:
+            # Get current context from call state
+            from utils import get_call_state
+            state = await get_call_state(conversation_id)
 
-        # Build booking state from stored context
-        phone = state.get("caller_phone", "")
-        if phone.startswith("+39"):
-            phone = phone[3:]
-        elif phone.startswith("0039"):
-            phone = phone[4:]
+            # Build booking state from stored context
+            phone = state.get("caller_phone", "")
+            if phone.startswith("+39"):
+                phone = phone[3:]
+            elif phone.startswith("0039"):
+                phone = phone[4:]
 
-        new_state = BookingState(
-            phase="idle",
-            booked_date=state.get("preferred_date"),
-            booked_time=state.get("preferred_time"),
-            customer_name=state.get("customer_name"),
-            customer_phone=phone,
-            services=state.get("services") or [],
-            operator_preference=state.get("operator_preference", "prima disponibile")
-        )
+            new_state = BookingState(
+                phase="idle",
+                booked_date=state.get("preferred_date"),
+                booked_time=state.get("preferred_time"),
+                customer_name=state.get("customer_name"),
+                customer_phone=phone,
+                services=state.get("services") or [],
+                operator_preference=state.get("operator_preference", "prima disponibile")
+            )
 
-        # Sync context — detects changes, resets if needed
-        sync_result = await sync_booking_context(session, {
-            "date": new_state.booked_date,
-            "time": new_state.booked_time,
-            "customer_name": new_state.customer_name,
-            "customer_phone": new_state.customer_phone,
-            "services": new_state.services,
-            "operator_preference": new_state.operator_preference
-        })
+            # Sync context — detects changes, resets if needed
+            sync_result = await sync_booking_context(session, {
+                "date": new_state.booked_date,
+                "time": new_state.booked_time,
+                "customer_name": new_state.customer_name,
+                "customer_phone": new_state.customer_phone,
+                "services": new_state.services,
+                "operator_preference": new_state.operator_preference
+            })
 
-        # Detect current page state
-        page_state = await detect_page_state(session.page)
-        logger.info(f"📊 Page state: {page_state['phase']} | Booking phase: {sync_result['current_phase']}")
+            # Detect current page state
+            page_state = await detect_page_state(session.page)
+            logger.info(f"📊 Page state: {page_state['phase']} | Booking phase: {sync_result['current_phase']}")
 
-        # Scan for any modals before advancing
-        modal_report = await adaptive_modal_scan(session.page, "advance-check")
-        if modal_report["blocking"]:
-            logger.warning(f"🚧 Blocking modals before advance: {modal_report['modals']}")
+            # Scan for any modals before advancing
+            modal_report = await adaptive_modal_scan(session.page, "advance-check")
+            if modal_report["blocking"]:
+                logger.warning(f"🚧 Blocking modals before advance: {modal_report['modals']}")
 
-        # Advance one step if possible
-        bs = session.booking_state
-        advanced_to = None
+            # Advance one step if possible
+            bs = session.booking_state
+            advanced_to = None
 
-        try:
             if sync_result["can_advance"]:
                 next_phase = sync_result["next_phase"]
 
@@ -187,26 +187,25 @@ async def advance_booking_endpoint(request: Request):
                     success = await advance_to_confirmed(session.page, bs)
                     bs.phase = "confirmed" if success else "ready_to_confirm"
                     advanced_to = "confirmed"
-        except Exception as e:
-            logger.error(f"❌ Advance failed: {e}")
-            return {
-                "success": False,
-                "error": str(e),
-                "message": f"Advance failed: {e}",
-                "current_phase": bs.phase,
-                "advanced_to": advanced_to
-            }
 
+            return {
+                "success": True,
+                "conversation_id": conversation_id,
+                "context_changed": sync_result["changed"],
+                "previous_phase": sync_result["current_phase"],
+                "current_phase": bs.phase,
+                "advanced_to": advanced_to,
+                "can_advance_again": bs.phase not in ("confirmed", "ready_to_confirm"),
+                "modals_detected": len(modal_report["modals"]),
+                "booking_data": sync_result["booking_data"]
+            }
+    except Exception as e:
+        logger.error(f"❌ /advance-booking error: {e}")
         return {
-            "success": True,
-            "conversation_id": conversation_id,
-            "context_changed": sync_result["changed"],
-            "previous_phase": sync_result["current_phase"],
-            "current_phase": bs.phase,
-            "advanced_to": advanced_to,
-            "can_advance_again": bs.phase not in ("confirmed", "ready_to_confirm"),
-            "modals_detected": len(modal_report["modals"]),
-            "booking_data": sync_result["booking_data"]
+            "success": False,
+            "error": str(e),
+            "message": f"Advance booking failed: {e}",
+            "conversation_id": conversation_id
         }
 
 

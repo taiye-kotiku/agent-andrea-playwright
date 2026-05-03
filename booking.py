@@ -175,32 +175,16 @@ async def advance_to_date_selected(page, booking_state: BookingState) -> bool:
 
     target = datetime.strptime(booking_state.booked_date, "%Y-%m-%d")
     day, month, year = target.day, target.month, target.year
+    date_selector = f".data[giorno='{day}'][mese='{month}'][anno='{year}']"
 
-    def _click_date():
-        return page.evaluate(f"""
-            () => {{
-                // Dismiss overlay first
-                const overlay = document.querySelector('.agenda_modale_sfondo');
-                if (overlay && (overlay.style.display !== 'none' && overlay.style.visibility !== 'hidden')) {{
-                    overlay.style.display = 'none';
-                }}
+    await dismiss_system_modals(page, "before-date")
 
-                const sel = ".data[giorno='{day}'][mese='{month}'][anno='{year}']";
-                const el = document.querySelector(sel);
-                if (!el) return {{ ok: false, reason: 'not_found' }};
-                el.click();
-                return {{ ok: true }};
-            }}
-        """)
-
-    result, _ = await safe_action(page, _click_date, f"click-date-{day}/{month}")
-
-    if not result or not result.get("ok"):
+    try:
+        await page.click(date_selector, timeout=10000)
+        logger.info(f"✅ Date clicked: {day}/{month}/{year}")
+    except Exception:
         raise Exception(f"Date {day}/{month}/{year} not found on calendar")
 
-    logger.info(f"✅ Date clicked: {day}/{month}/{year}")
-
-    # Wait for grid to load
     try:
         await page.wait_for_function(
             f"() => document.querySelectorAll(\".cella[giorno='{day}'][mese='{month}'][anno='{year}']\").length > 0",
@@ -208,10 +192,18 @@ async def advance_to_date_selected(page, booking_state: BookingState) -> bool:
         )
     except Exception:
         logger.warning("Grid didn't load after date click — retrying")
-        await _click_date()
-        await asyncio.sleep(2)
+        await page.evaluate("""
+            () => {
+                document.querySelectorAll('.modale_overlay, .overlay_modale, .overlay, #modale_sfondo, .agenda_modale_sfondo').forEach(el => {
+                    if (getComputedStyle(el).display !== 'none') el.style.display = 'none';
+                });
+            }
+        """)
+        await page.click(date_selector, timeout=5000)
+        await page.wait_for_timeout(5000)
 
-    await asyncio.sleep(1)
+    await page.wait_for_timeout(2000)
+    await dismiss_system_modals(page, "after-date")
     return True
 
 
@@ -232,7 +224,8 @@ async def advance_to_time_selected(page, booking_state: BookingState) -> bool:
     hour = str(raw_hour)
     minute = str(rounded_minute)
 
-    # Get operator map
+    logger.info(f"Step: Time {hour}:{minute} | operator pref: {booking_state.operator_preference}")
+
     operator_map = await page.evaluate("""
         () => {
             const map = {};
@@ -244,8 +237,8 @@ async def advance_to_time_selected(page, booking_state: BookingState) -> bool:
             return map;
         }
     """)
+    logger.info(f"Operator map: {operator_map}")
 
-    # Determine operator
     preferred_op_id = None
     operator_pref = (booking_state.operator_preference or "prima disponibile").strip().lower()
     if operator_pref != "prima disponibile":
@@ -254,93 +247,119 @@ async def advance_to_time_selected(page, booking_state: BookingState) -> bool:
                 preferred_op_id = op_id
                 break
 
-    # Try to click
-    def _try_click(op_id=None, h=None, m=None):
-        h = h or hour
-        m = m or minute
-        return f"""
-            () => {{
-                // Dismiss overlay first
-                const overlay = document.querySelector('.agenda_modale_sfondo');
-                if (overlay && (overlay.style.display !== 'none' && overlay.style.visibility !== 'hidden')) {{
-                    overlay.style.display = 'none';
-                }}
+    def exact_selector(op_id=None, h=None, m=None):
+        h = h if h is not None else hour
+        m = m if m is not None else minute
+        base = f".cella[giorno='{day}'][mese='{month}'][anno='{year}'][ora='{h}'][minuto='{m}']"
+        if op_id:
+            base += f"[id_operatore='{op_id}']"
+        base += ":not(.assente):not(.occupata)"
+        return base
 
-                // Find cell in operator column - use correct attribute format
-                const baseSelector = ".cella[ora=\\"" + "{h}" + "\\"][minuto=\\"" + "{m}" + "\\"][giorno=\\"" + "{day}" + "\\"][mese=\\"" + "{month}" + "\\"][anno=\\"" + "{year}" + "\\"]";
-                let cell = null;
-                
-                // If operator specified, find in their column
-                if ("{op_id}") {{
-                    const opCol = document.querySelector(".operatore_orari.presente[id_operatore=\\"" + "{op_id}" + "\\"]");
-                    if (opCol) {{
-                        cell = opCol.querySelector(".cella[ora=\\"" + "{h}" + "\\"][minuto=\\"" + "{m}" + "\\"]");
-                    }}
-                }} else {{
-                    // Find ANY available cell for this time
-                    const allCells = document.querySelectorAll(baseSelector + ":not(.assente)");
-                    cell = allCells.length > 0 ? allCells[0] : null;
-                }}
-                
-                if (!cell) {{
-                    // Debug: check what's available
-                    const hourCells = document.querySelectorAll(".cella[ora=\\"" + "{h}" + "\\"][giorno=\\"" + "{day}" + "\\"][mese=\\"" + "{month}" + "\\"]:not(.assente)");
-                    return {{ ok: false, reason: 'not_found', available_count: hourCells.length }};
-                }}
-                
-                cell.click();
-                return {{ ok: true, op: cell.getAttribute('id_operatore'), minuto: cell.getAttribute('minuto') }};
-            }}
-        """
+    def hour_selector(op_id=None, h=None):
+        h = h if h is not None else hour
+        base = f".cella[giorno='{day}'][mese='{month}'][anno='{year}'][ora='{h}']"
+        if op_id:
+            base += f"[id_operatore='{op_id}']"
+        base += ":not(.assente):not(.occupata)"
+        return base
 
     clicked = False
     actual_time = f"{hour}:{minute}"
     clicked_operator_id = preferred_op_id
 
-    def _hour_selector(op_id=None, h=None):
-        h = h or hour
-        base = f".cella[giorno='{day}'][mese='{month}'][anno='{year}'][ora='{h}']"
-        if op_id:
-            base += f"[id_operatore='{op_id}']"
-        base += ":not(.assente)"
-        return base
-
     if preferred_op_id:
-        # Try exact slot
-        for m_try in [minute, "0", "15", "30", "45"]:
-            result, _ = await safe_action(page, lambda: page.evaluate(_try_click(op_id=preferred_op_id, m=m_try)), f"click-time-{hour}:{m_try}")
-            if result and result.get("ok"):
+        logger.info(f"Trying specific operator slot for id_operatore={preferred_op_id}")
+        try:
+            sel = exact_selector(op_id=preferred_op_id)
+            count = await page.evaluate(f"() => document.querySelectorAll(\"{sel}\").length")
+            logger.info(f"Specific op exact count: {count}")
+            if count > 0:
+                await page.click(sel, timeout=5000)
                 clicked = True
-                actual_time = f"{hour}:{result.get('minuto', m_try)}"
                 clicked_operator_id = preferred_op_id
-                break
+                logger.info(f"✅ Clicked exact slot for preferred operator {preferred_op_id}")
+        except Exception as e:
+            logger.warning(f"Specific operator exact click failed: {e}")
 
         if not clicked:
-            # Try next hours
-            for try_hour in range(raw_hour + 1, 20):
-                result, _ = await safe_action(page, lambda h=str(try_hour): page.evaluate(_try_click(op_id=preferred_op_id, h=h)), f"click-time-{try_hour}")
-                if result and result.get("ok"):
+            try:
+                sel = hour_selector(op_id=preferred_op_id)
+                count = await page.evaluate(f"() => document.querySelectorAll(\"{sel}\").length")
+                logger.info(f"Specific op hour count: {count}")
+                if count > 0:
+                    actual_min = await page.evaluate(f"() => {{ const c = document.querySelector(\"{sel}\"); return c ? c.getAttribute('minuto') : null; }}")
+                    await page.click(sel, timeout=5000)
+                    actual_time = f"{hour}:{actual_min or '0'}"
                     clicked = True
-                    actual_time = f"{try_hour}:{result.get('minuto', '0')}"
-                    break
+                    clicked_operator_id = preferred_op_id
+                    logger.info(f"✅ Clicked same-hour fallback for preferred operator: {actual_time}")
+            except Exception as e:
+                logger.warning(f"Specific operator hour fallback failed: {e}")
+
+        if not clicked:
+            for try_hour in range(raw_hour + 1, 20):
+                try:
+                    sel = hour_selector(op_id=preferred_op_id, h=str(try_hour))
+                    count = await page.evaluate(f"() => document.querySelectorAll(\"{sel}\").length")
+                    if count > 0:
+                        actual_min = await page.evaluate(f"() => {{ const c = document.querySelector(\"{sel}\"); return c ? c.getAttribute('minuto') : '0'; }}")
+                        await page.click(sel, timeout=5000)
+                        actual_time = f"{try_hour}:{actual_min}"
+                        clicked = True
+                        clicked_operator_id = preferred_op_id
+                        logger.info(f"✅ Clicked next available for preferred operator: {actual_time}")
+                        break
+                except Exception:
+                    continue
+
+        if not clicked:
+            raise Exception(f"No available slot for operator '{booking_state.operator_preference}' on {booking_state.booked_date} around {booking_state.booked_time}")
+
     else:
-        # Prima disponibile
-        for m_try in [minute, "0", "15", "30", "45"]:
-            result, _ = await safe_action(page, lambda m=m_try: page.evaluate(_try_click(m=m)), f"click-time-{hour}:{m_try}")
-            if result and result.get("ok"):
+        logger.info("Using prima disponibile logic")
+        try:
+            sel = exact_selector()
+            count = await page.evaluate(f"() => document.querySelectorAll(\"{sel}\").length")
+            logger.info(f"Any-op exact count: {count}")
+            if count > 0:
+                clicked_operator_id = await page.evaluate(f"() => {{ const c = document.querySelector(\"{sel}\"); return c ? c.getAttribute('id_operatore') : null; }}")
+                await page.click(sel, timeout=5000)
                 clicked = True
-                actual_time = f"{hour}:{result.get('minuto', m_try)}"
-                clicked_operator_id = result.get("op")
-                break
+                logger.info(f"✅ Clicked exact slot for first available operator {clicked_operator_id}")
+        except Exception as e:
+            logger.warning(f"Any-op exact click failed: {e}")
+
+        if not clicked:
+            try:
+                sel = hour_selector()
+                count = await page.evaluate(f"() => document.querySelectorAll(\"{sel}\").length")
+                logger.info(f"Any-op hour count: {count}")
+                if count > 0:
+                    result = await page.evaluate(f"() => {{ const c = document.querySelector(\"{sel}\"); return c ? {{minuto: c.getAttribute('minuto'), op: c.getAttribute('id_operatore')}} : null; }}")
+                    await page.click(sel, timeout=5000)
+                    actual_time = f"{hour}:{result['minuto'] if result else '0'}"
+                    clicked_operator_id = result['op'] if result else None
+                    clicked = True
+                    logger.info(f"✅ Clicked same-hour first available: {actual_time} | op={clicked_operator_id}")
+            except Exception as e:
+                logger.warning(f"Any-op hour fallback failed: {e}")
 
         if not clicked:
             for try_hour in range(raw_hour + 1, 20):
-                result, _ = await safe_action(page, lambda h=str(try_hour): page.evaluate(_try_click(h=h)), f"click-time-{try_hour}")
-                if result and result.get("ok"):
-                    clicked = True
-                    actual_time = f"{try_hour}:{result.get('minuto', '0')}"
-                    clicked_operator_id = result.get("op")
-                    break
+                try:
+                    sel = hour_selector(h=str(try_hour))
+                    count = await page.evaluate(f"() => document.querySelectorAll(\"{sel}\").length")
+                    if count > 0:
+                        result = await page.evaluate(f"() => {{ const c = document.querySelector(\"{sel}\"); return c ? {{minuto: c.getAttribute('minuto'), op: c.getAttribute('id_operatore')}} : null; }}")
+                        await page.click(sel, timeout=5000)
+                        actual_time = f"{try_hour}:{result['minuto'] if result else '0'}"
+                        clicked_operator_id = result['op'] if result else None
+                        clicked = True
+                        logger.info(f"✅ Clicked next available: {actual_time} | op={clicked_operator_id}")
+                        break
+                except Exception:
+                    continue
 
     if not clicked:
         raise Exception(f"No available time slot on {booking_state.booked_date}")

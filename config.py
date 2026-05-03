@@ -72,6 +72,7 @@ call_states_lock = asyncio.Lock()
 cache_lock = asyncio.Lock()
 wegest_sessions_lock = asyncio.Lock()
 pool_lock = asyncio.Lock()
+booking_lock = asyncio.Lock()
 
 # Global state
 screenshots = {}
@@ -85,6 +86,9 @@ availability_cache = {
     "updated_at": None,
     "days": {}
 }
+
+availability_cache_ttl: dict[str, datetime] = {}
+AVAILABILITY_CACHE_TTL_SECONDS = 60
 
 wegest_sessions: dict[str, 'WegestSession'] = {}
 MAX_CONCURRENT_SESSIONS = 3

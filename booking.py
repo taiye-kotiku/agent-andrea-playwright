@@ -77,9 +77,9 @@ async def run_wegest_booking(request: 'BookingRequest') -> dict:
                 )
             except Exception:
                 await page.click(date_selector, timeout=5000)
-                await page.wait_for_timeout(5000)
+                await page.wait_for_timeout(2000)
 
-            await page.wait_for_timeout(2000)
+            await page.wait_for_timeout(1000)
             await dismiss_system_modals(page, "after-date")
             await snap(page, "05_date")
 
@@ -274,7 +274,7 @@ async def run_wegest_booking(request: 'BookingRequest') -> dict:
                 raise Exception(f"No available slot on {day}/{month}/{year}")
 
             logger.info(f"Final clicked slot: {actual_time} | id_operatore={clicked_operator_id}")
-            await page.wait_for_timeout(3000)
+            await page.wait_for_timeout(2000)
             await snap(page, "06_time")
 
             # STEP 7: Customer search & selection
@@ -344,7 +344,7 @@ async def run_wegest_booking(request: 'BookingRequest') -> dict:
 
                 logger.info(f"  Search 1: '{request.customer_name}'")
                 await page.fill(".cerca_cliente.modale input[name='cerca_cliente']", request.customer_name)
-                await page.wait_for_timeout(3000)
+                await page.wait_for_timeout(1500)
                 await snap(page, "07a_full")
                 match = await page.evaluate(match_js)
                 if match and match.get('found'):
@@ -354,7 +354,7 @@ async def run_wegest_booking(request: 'BookingRequest') -> dict:
                 if not customer_found:
                     logger.info(f"  Search 2: '{first_name}'")
                     await page.fill(".cerca_cliente.modale input[name='cerca_cliente']", first_name)
-                    await page.wait_for_timeout(3000)
+                    await page.wait_for_timeout(1500)
                     await snap(page, "07b_first")
                     match = await page.evaluate(match_js)
                     if match and match.get('found'):
@@ -364,7 +364,7 @@ async def run_wegest_booking(request: 'BookingRequest') -> dict:
                 if not customer_found and last_name:
                     logger.info(f"  Search 3: '{last_name}'")
                     await page.fill(".cerca_cliente.modale input[name='cerca_cliente']", last_name)
-                    await page.wait_for_timeout(3000)
+                    await page.wait_for_timeout(1500)
                     await snap(page, "07c_last")
                     match = await page.evaluate(match_js)
                     if match and match.get('found'):
@@ -374,7 +374,7 @@ async def run_wegest_booking(request: 'BookingRequest') -> dict:
                 if not customer_found and search_phone:
                     logger.info(f"  Search 4: phone '{search_phone}'")
                     await page.fill(".cerca_cliente.modale input[name='cerca_cliente']", search_phone)
-                    await page.wait_for_timeout(3000)
+                    await page.wait_for_timeout(1500)
                     await snap(page, "07d_phone")
                     match = await page.evaluate("""
                         () => {
@@ -404,7 +404,7 @@ async def run_wegest_booking(request: 'BookingRequest') -> dict:
                             if (btn) btn.click();
                         }
                     """)
-                    await page.wait_for_timeout(3000)
+                    await page.wait_for_timeout(2000)
                     await snap(page, "07e_new_form")
 
                     await page.evaluate(f"""
@@ -464,7 +464,7 @@ async def run_wegest_booking(request: 'BookingRequest') -> dict:
                     else:
                         logger.warning("⚠️ Could not click Add customer!")
 
-                    await page.wait_for_timeout(4000)
+                    await page.wait_for_timeout(2000)
                     await snap(page, "07g_saved")
                     await dismiss_system_modals(page, "after-new-customer")
 
@@ -472,7 +472,7 @@ async def run_wegest_booking(request: 'BookingRequest') -> dict:
                 logger.warning(f"Customer error: {e}")
                 await snap(page, "07_ERROR")
 
-            await page.wait_for_timeout(2000)
+            await page.wait_for_timeout(1000)
 
             # STEP 7.5: Phone modal
             phone_handled = await page.evaluate(f"""
@@ -494,9 +494,9 @@ async def run_wegest_booking(request: 'BookingRequest') -> dict:
                     return {{ visible: true, filled: !!inp, confirmed: false }};
                 }}
             """)
-            if phone_handled and phone_handled.get('visible'):
-                logger.info(f"📱 Phone modal: {phone_handled}")
-                await page.wait_for_timeout(2000)
+    if phone_handled and phone_handled.get('visible'):
+        logger.info(f"📱 Phone modal: {phone_handled}")
+        await page.wait_for_timeout(1000)
             else:
                 logger.info("📱 No phone modal")
 
@@ -674,7 +674,7 @@ async def run_wegest_booking(request: 'BookingRequest') -> dict:
             else:
                 logger.info("Step 9: Default operator")
 
-            await page.wait_for_timeout(1000)
+            await page.wait_for_timeout(500)
             await snap(page, "10_operator")
 
             # STEP 10: Add appointment
@@ -704,10 +704,10 @@ async def run_wegest_booking(request: 'BookingRequest') -> dict:
                 except Exception:
                     await snap(page, "10_ERROR")
 
-            await page.wait_for_timeout(5000)
+            await page.wait_for_timeout(3000)
             await snap(page, "11_saved")
             await dismiss_system_modals(page, "post-save")
-            await page.wait_for_timeout(2000)
+            await page.wait_for_timeout(1000)
 
             # VERIFY
             on_agenda = await page.evaluate("""

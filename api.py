@@ -4,8 +4,11 @@ FastAPI routes for Agent Andrea
 
 from fastapi import FastAPI, HTTPException, Request
 from fastapi.responses import HTMLResponse
+from fastapi.middleware.gzip import GZipMiddleware
 import config
-from config import app, API_SECRET, DEBUG_SCREENSHOTS, screenshots, logger
+from config import app, API_SECRET, DEBUG_SCREENSHOTS, screenshots, logger, booking_lock
+
+app.add_middleware(GZipMiddleware, minimum_size=1000)
 from api_models import (
     BookingRequest,
     UpdateBookingContextRequest,
@@ -486,18 +489,19 @@ async def finalize_booking_endpoint(request: Request, payload: FinalizeBookingRe
             "message": "Cannot finalize booking because required fields are missing"
         }
 
-    booking_request = BookingRequest(
-        customer_name=state["customer_name"],
-        caller_phone=state["caller_phone"],
-        service=None,
-        services=state.get("services") or [],
-        operator_preference=state.get("operator_preference") or "prima disponibile",
-        preferred_date=state["preferred_date"],
-        preferred_time=state["preferred_time"],
-        conversation_id=payload.conversation_id
-    )
+    async with booking_lock:
+        booking_request = BookingRequest(
+            customer_name=state["customer_name"],
+            caller_phone=state["caller_phone"],
+            service=None,
+            services=state.get("services") or [],
+            operator_preference=state.get("operator_preference") or "prima disponibile",
+            preferred_date=state["preferred_date"],
+            preferred_time=state["preferred_time"],
+            conversation_id=payload.conversation_id
+        )
 
-    result = await run_wegest_booking(booking_request)
+        result = await run_wegest_booking(booking_request)
 
     if result.get("success"):
         await clear_call_state(payload.conversation_id)

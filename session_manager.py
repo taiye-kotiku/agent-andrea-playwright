@@ -178,8 +178,8 @@ async def ensure_wegest_logged_in(conversation_id: str):
     page = session.page
 
     logger.info(f"🔐 Logging into Wegest session for {conversation_id}...")
-    await page.goto(LOGIN_URL, wait_until="networkidle", timeout=60000)
-    await page.wait_for_timeout(5000)
+    await page.goto(LOGIN_URL, wait_until="domcontentloaded", timeout=30000)
+    await page.wait_for_selector("input[name='username']", timeout=10000)
 
     await page.fill("input[name='username']", WEGEST_USER)
     await page.fill("input[name='password']", WEGEST_PASSWORD)
@@ -193,12 +193,12 @@ async def ensure_wegest_logged_in(conversation_id: str):
                 const lp = document.getElementById('pannello_login');
                 return lp && getComputedStyle(lp).display === 'none';
             }""",
-            timeout=60000
+            timeout=30000
         )
     except Exception:
         pass
 
-    await page.wait_for_timeout(30000)
+    await page.wait_for_timeout(10000)
 
     login_visible = await page.evaluate("""() => {
         const el = document.getElementById('pannello_login');
@@ -215,7 +215,6 @@ async def ensure_wegest_logged_in(conversation_id: str):
     logger.info(f"🎉 Wegest session login successful for {conversation_id}")
 
     await dismiss_system_modals(page, "post-login")
-    await page.wait_for_timeout(2000)
 
     return session
 
@@ -255,7 +254,7 @@ async def dismiss_system_modals(page, label=""):
             }
         """)
         logger.info(f"  → {clicked}")
-        await page.wait_for_timeout(2500)
+        await page.wait_for_timeout(1000)
     await page.evaluate("""
         () => document.querySelectorAll('.modale_overlay, .overlay_modale, .overlay').forEach(el => {
             if (getComputedStyle(el).display !== 'none') el.style.display = 'none';
@@ -361,8 +360,8 @@ async def create_and_warm_pool_session(pool_id: str):
 
     logger.info(f"🔥 Warming pool session {pool_id}...")
 
-    await page.goto(LOGIN_URL, wait_until="networkidle", timeout=60000)
-    await page.wait_for_timeout(5000)
+    await page.goto(LOGIN_URL, wait_until="domcontentloaded", timeout=30000)
+    await page.wait_for_selector("input[name='username']", timeout=10000)
 
     await page.fill("input[name='username']", WEGEST_USER)
     await page.fill("input[name='password']", WEGEST_PASSWORD)
@@ -376,12 +375,12 @@ async def create_and_warm_pool_session(pool_id: str):
                 const lp = document.getElementById('pannello_login');
                 return lp && getComputedStyle(lp).display === 'none';
             }""",
-            timeout=60000
+            timeout=30000
         )
     except Exception:
         pass
 
-    await page.wait_for_timeout(30000)
+    await page.wait_for_timeout(10000)
 
     login_visible = await page.evaluate("""() => {
         const el = document.getElementById('pannello_login');
@@ -394,12 +393,11 @@ async def create_and_warm_pool_session(pool_id: str):
     logger.info(f"✅ Pool session {pool_id} logged in")
 
     await dismiss_system_modals(page, "post-login")
-    await page.wait_for_timeout(2000)
 
     await page.click("[pannello='pannello_agenda']")
-    await page.wait_for_timeout(5000)
-    await dismiss_system_modals(page, "after-agenda")
     await page.wait_for_timeout(2000)
+    await dismiss_system_modals(page, "after-agenda")
+    await page.wait_for_timeout(1000)
 
     session.agenda_open = True
     logger.info(f"📅 Pool session {pool_id} agenda ready")

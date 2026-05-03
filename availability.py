@@ -33,6 +33,8 @@ async def run_availability_check(request: 'AvailabilityRequest') -> dict:
         if fresh and fresh.get("is_open") is True and "operators" in fresh:
             from utils import set_cached_day
             await set_cached_day(request.preferred_date, fresh)
+            from config import availability_cache_ttl
+            availability_cache_ttl[request.preferred_date] = datetime.utcnow()
 
         return {
             **fresh,
@@ -41,6 +43,15 @@ async def run_availability_check(request: 'AvailabilityRequest') -> dict:
 
     # 2. Otherwise use cache if available
     from utils import get_cached_day
+    from config import availability_cache_ttl, AVAILABILITY_CACHE_TTL_SECONDS
+    now = datetime.utcnow()
+
+    # Check if cached entry is still within TTL
+    cached_ts = availability_cache_ttl.get(request.preferred_date)
+    if cached_ts and (now - cached_ts).total_seconds() > AVAILABILITY_CACHE_TTL_SECONDS:
+        availability_cache_ttl.pop(request.preferred_date, None)
+        logger.info(f"⏰ Availability cache TTL expired for {request.preferred_date}")
+
     cached = await get_cached_day(request.preferred_date)
 
     if cached:

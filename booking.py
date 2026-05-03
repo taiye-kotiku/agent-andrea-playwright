@@ -273,6 +273,7 @@ async def advance_to_time_selected(page, booking_state: BookingState) -> bool:
     clicked = False
     actual_time = f"{hour}:{minute}"
     clicked_operator_id = preferred_op_id
+    last_result = None
 
     def _hour_selector(op_id=None, h=None):
         h = h or hour

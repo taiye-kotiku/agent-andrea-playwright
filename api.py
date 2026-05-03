@@ -22,7 +22,7 @@ from api_models import (
 from booking import run_wegest_booking
 from availability import run_availability_check
 from utils import normalize_requested_services, get_missing_booking_fields, load_cache_from_disk
-from session_manager import snap, dump_html, warm_pool_on_startup, cleanup_idle_wegest_sessions, cleanup_idle_pool_sessions, dismiss_system_modals, assign_idle_pool_session_to_conversation, adaptive_modal_scan
+from session_manager import snap, dump_html, warm_pool_on_startup, cleanup_idle_wegest_sessions, cleanup_idle_pool_sessions, dismiss_system_modals, assign_idle_pool_session_to_conversation, adaptive_modal_scan, return_session_to_pool, check_and_return_idle_sessions
 from utils import cleanup_expired_call_states
 from catalog import extract_service_operator_durations_from_page
 from datetime import datetime
@@ -842,6 +842,7 @@ async def startup_event():
     asyncio.create_task(cleanup_wegest_sessions_forever())
     asyncio.create_task(cleanup_pool_sessions_forever())
     asyncio.create_task(warm_pool_on_startup())
+    asyncio.create_task(check_and_return_idle_sessions_forever())
     logger.info("🚀 App started (background refresh disabled, warm pool starting)")
 
 
@@ -871,3 +872,13 @@ async def cleanup_pool_sessions_forever():
         except Exception as e:
             logger.warning(f"Pool session cleanup failed: {e}")
         await asyncio.sleep(300)
+
+
+async def check_and_return_idle_sessions_forever():
+    """Check every minute for idle sessions not on login page."""
+    while True:
+        try:
+            await check_and_return_idle_sessions(inactivity_seconds=300)  # 5 minutes
+        except Exception as e:
+            logger.warning(f"Idle session check failed: {e}")
+        await asyncio.sleep(60)  # check every minute

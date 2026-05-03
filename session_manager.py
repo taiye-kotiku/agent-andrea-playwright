@@ -652,13 +652,18 @@ async def create_and_warm_pool_session(pool_id: str):
 
 async def warm_pool_on_startup():
     await asyncio.sleep(5)
-
+    logger.info("🔥 Starting pool warmup...")
+    
     for i in range(POOL_SIZE):
         pool_id = f"pool_{i+1}"
         try:
+            logger.info(f"Creating pool session {pool_id}...")
             await create_and_warm_pool_session(pool_id)
+            logger.info(f"✅ Pool session {pool_id} ready")
         except Exception as e:
-            logger.warning(f"Failed to warm {pool_id}: {e}")
+            logger.error(f"❌ Failed to warm {pool_id}: {e}")
+            import traceback
+            logger.error(traceback.format_exc())
 
 
 async def ensure_pool_healthy():
@@ -717,18 +722,85 @@ async def cleanup_idle_wegest_sessions():
         logger.info(f"🧹 Cleaned {len(to_remove)} idle Wegest sessions")
 
 
-async def cleanup_idle_pool_sessions():
+async def return_session_to_pool(conversation_id: str):
+    """Return a conversation's assigned session to the pool (make it idle again)."""
+    async with pool_lock:
+        pool_id = conversation_to_pool_session.get(conversation_id)
+        if not pool_id:
+            logger.info(f"No pool session to return for {conversation_id}")
+            return False
+
+        session = wegest_pool.get(pool_id)
+        if session:
+            session.in_use = False
+            session.assigned_conversation_id = None
+            logger.info(f"↩️ Returned {pool_id} to pool")
+
+        conversation_to_pool_session.pop(conversation_id, None)
+        return True
+
+
+async def check_and_return_idle_sessions(inactivity_seconds: int = 300):
+    """Check for conversations idle too long (not on login page) and return their sessions to pool."""
     now = datetime.utcnow()
-    to_reset = []
+    returned_count = 0
 
     async with pool_lock:
-        for pool_id, session in list(wegest_pool.items()):
-            if session.last_used_at and (now - session.last_used_at).total_seconds() > SESSION_IDLE_TTL_SECONDS:
-                if session.assigned_conversation_id and pool_id not in [s for s in conversation_to_pool_session.values()]:
-                    to_reset.append(pool_id)
+        assignments = list(conversation_to_pool_session.items())
 
-    for pool_id in to_reset:
-        await reset_pool_session(pool_id)
+    for conversation_id, pool_id in assignments:
+        session = wegest_pool.get(pool_id)
+        if not session:
+            continue
 
-    if to_reset:
-        logger.info(f"♻️ Cleaned {len(to_reset)} idle pool sessions")
+        # Check if we have a page and it's still valid
+        if not session.page or session.page.is_closed():
+            await return_session_to_pool(conversation_id)
+            returned_count += 1
+            logger.info(f"↩️ Returned {pool_id} (page closed)")
+            continue
+
+        # Check last activity
+        if not session.last_used_at:
+            continue
+        idle_seconds = (now - session.last_used_at).total_seconds()
+        if idle_seconds < inactivity_seconds:
+            continue
+
+        # Check if on login page - if on login, keep session (user may be starting fresh)
+        try:
+            on_login = await session.page.evaluate("""() => {
+                const loginPanel = document.getElementById('pannello_login');
+                return loginPanel && getComputedStyle(loginPanel).display !== 'none';
+            }""")
+            if on_login:
+                # On login page - skip, don't return
+                session.last_used_at = datetime.utcnow()
+                continue
+
+            # Not on login, been idle - return to pool
+            await return_session_to_pool(conversation_id)
+            returned_count += 1
+            logger.info(f"↩️ Returned {pool_id} (idle {int(idle_seconds)}s, not on login)")
+        except Exception as e:
+            logger.warning(f"Error checking {pool_id}: {e}")
+            await return_session_to_pool(conversation_id)
+            returned_count += 1
+
+    if returned_count:
+        logger.info(f"↩️ Returned {returned_count} idle sessions to pool")
+
+    return returned_count
+
+
+# Export the new functions
+__all__ = [
+    "get_or_create_wegest_session", "reset_wegest_session",
+    "is_wegest_session_alive", "ensure_wegest_browser", "ensure_wegest_logged_in",
+    "dismiss_system_modals", "adaptive_modal_scan",
+    "get_assigned_pool_session", "assign_idle_pool_session_to_conversation",
+    "reset_pool_session", "create_and_warm_pool_session", "warm_pool_on_startup",
+    "ensure_pool_healthy", "get_live_session_for_conversation",
+    "cleanup_idle_wegest_sessions", "cleanup_idle_pool_sessions",
+    "return_session_to_pool", "check_and_return_idle_sessions"
+]

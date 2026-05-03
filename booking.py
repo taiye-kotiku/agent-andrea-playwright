@@ -349,6 +349,34 @@ async def advance_to_time_selected(page, booking_state: BookingState) -> bool:
     booking_state.booked_operator = clicked_operator_id
     logger.info(f"✅ Time selected: {actual_time} | operator={clicked_operator_id}")
     await asyncio.sleep(2)
+    
+    # After time click, check if customer modal opened - if not, we need to open customer search
+    await adaptive_modal_scan(page, "post-time-click")
+    
+    modal_opened = await page.evaluate("""() => {
+        const m = document.querySelector('.cerca_cliente.modale');
+        return m && getComputedStyle(m).display !== 'none';
+    }""")
+    
+    if not modal_opened:
+        # Click the customer search button to open modal
+        logger.info("⏳ Customer modal not auto-opened, manually opening...")
+        await page.evaluate("""() => {
+            // Try various customer search buttons
+            const btns = document.querySelectorAll('.button, a.button, [onclick*="cliente"]');
+            for (const btn of btns) {
+                const txt = btn.textContent.toLowerCase();
+                if (txt.includes('cliente') || txt.includes('cerca')) {
+                    btn.click();
+                    return;
+                }
+            }
+            // Or click the first button in the booking form
+            const firstBtn = document.querySelector('.appuntamento .button');
+            if (firstBtn) firstBtn.click();
+        }""")
+        await asyncio.sleep(1)
+    
     return True
 
 

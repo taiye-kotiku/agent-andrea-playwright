@@ -22,7 +22,7 @@ from api_models import (
 from booking import run_wegest_booking
 from availability import run_availability_check
 from utils import normalize_requested_services, get_missing_booking_fields, load_cache_from_disk
-from session_manager import snap, warm_pool_on_startup, cleanup_idle_wegest_sessions, cleanup_idle_pool_sessions, dismiss_system_modals, assign_idle_pool_session_to_conversation
+from session_manager import snap, warm_pool_on_startup, cleanup_idle_wegest_sessions, cleanup_idle_pool_sessions, dismiss_system_modals, assign_idle_pool_session_to_conversation, adaptive_modal_scan
 from utils import cleanup_expired_call_states
 from catalog import extract_service_operator_durations_from_page
 from datetime import datetime
@@ -38,6 +38,174 @@ async def root():
 @app.get("/health")
 async def health():
     return {"status": "ok", "service": "Agent Andrea Wegest Booking"}
+
+
+@app.get("/booking-status")
+async def booking_status(request: Request, conversation_id: str = None):
+    """Check the current live booking state for a conversation."""
+    auth = request.headers.get("Authorization") or request.headers.get("authorization") or ""
+    if auth != f"Bearer {API_SECRET}":
+        raise HTTPException(status_code=401, detail="Unauthorized")
+
+    if not conversation_id:
+        raise HTTPException(status_code=400, detail="conversation_id required")
+
+    from session_manager import get_assigned_pool_session
+    session = await get_assigned_pool_session(conversation_id)
+    if not session:
+        return {"success": False, "message": "No session assigned", "conversation_id": conversation_id}
+
+    bs = session.booking_state
+    from booking import detect_page_state
+    page_state = {"phase": "unknown"}
+    if session.page and not session.page.is_closed():
+        try:
+            page_state = await detect_page_state(session.page)
+        except Exception as e:
+            page_state = {"phase": "error", "error": str(e)}
+
+    return {
+        "success": True,
+        "conversation_id": conversation_id,
+        "booking_state": {
+            "phase": bs.phase if bs else "none",
+            "date": bs.booked_date if bs else None,
+            "time": bs.booked_time if bs else None,
+            "customer": bs.customer_name if bs else None,
+            "services": bs.services if bs else [],
+            "operator": bs.operator_preference if bs else None
+        } if bs else None,
+        "page_state": page_state
+    }
+
+
+@app.post("/advance-booking")
+async def advance_booking_endpoint(request: Request):
+    """Advance the live booking one step forward. Call after each /update-booking-context
+    to make the bot behave like a real receptionist — advancing as info arrives.
+
+    If context changed (e.g., customer changed date), the booking resets and starts fresh.
+    """
+    auth = request.headers.get("Authorization") or request.headers.get("authorization") or ""
+    if auth != f"Bearer {API_SECRET}":
+        raise HTTPException(status_code=401, detail="Unauthorized")
+
+    body = await request.json()
+    conversation_id = body.get("conversation_id")
+    if not conversation_id:
+        raise HTTPException(status_code=400, detail="conversation_id required")
+
+    from session_manager import get_assigned_pool_session, get_live_session_for_conversation
+    from booking import sync_booking_context, detect_page_state, advance_to_date_selected, advance_to_time_selected, advance_to_customer_selected, advance_to_phone_confirmed, advance_to_services_selected, advance_to_operator_selected, advance_to_confirmed, BookingState
+
+    session = await get_live_session_for_conversation(conversation_id)
+    if not session:
+        return {"success": False, "message": "No live session for this conversation"}
+
+    async with session.lock:
+        # Get current context from call state
+        from utils import get_call_state
+        state = await get_call_state(conversation_id)
+
+        # Build booking state from stored context
+        phone = state.get("caller_phone", "")
+        if phone.startswith("+39"):
+            phone = phone[3:]
+        elif phone.startswith("0039"):
+            phone = phone[4:]
+
+        new_state = BookingState(
+            phase="idle",
+            booked_date=state.get("preferred_date"),
+            booked_time=state.get("preferred_time"),
+            customer_name=state.get("customer_name"),
+            customer_phone=phone,
+            services=state.get("services") or [],
+            operator_preference=state.get("operator_preference", "prima disponibile")
+        )
+
+        # Sync context — detects changes, resets if needed
+        sync_result = await sync_booking_context(session, {
+            "date": new_state.booked_date,
+            "time": new_state.booked_time,
+            "customer_name": new_state.customer_name,
+            "customer_phone": new_state.customer_phone,
+            "services": new_state.services,
+            "operator_preference": new_state.operator_preference
+        })
+
+        # Detect current page state
+        page_state = await detect_page_state(session.page)
+        logger.info(f"📊 Page state: {page_state['phase']} | Booking phase: {sync_result['current_phase']}")
+
+        # Scan for any modals before advancing
+        modal_report = await adaptive_modal_scan(session.page, "advance-check")
+        if modal_report["blocking"]:
+            logger.warning(f"🚧 Blocking modals before advance: {modal_report['modals']}")
+
+        # Advance one step if possible
+        bs = session.booking_state
+        advanced_to = None
+
+        try:
+            if sync_result["can_advance"]:
+                next_phase = sync_result["next_phase"]
+
+                if next_phase == "date_selected" and bs.booked_date:
+                    await advance_to_date_selected(session.page, bs)
+                    bs.phase = "date_selected"
+                    advanced_to = "date_selected"
+
+                elif next_phase == "time_selected" and bs.booked_time:
+                    await advance_to_time_selected(session.page, bs)
+                    bs.phase = "time_selected"
+                    advanced_to = "time_selected"
+
+                elif next_phase == "customer_selected" and bs.customer_name:
+                    await advance_to_customer_selected(session.page, bs)
+                    bs.phase = "customer_selected"
+                    advanced_to = "customer_selected"
+
+                elif next_phase == "phone_confirmed":
+                    await advance_to_phone_confirmed(session.page, bs)
+                    bs.phase = "phone_confirmed"
+                    advanced_to = "phone_confirmed"
+
+                elif next_phase == "services_selected" and bs.services:
+                    await advance_to_services_selected(session.page, bs)
+                    bs.phase = "services_selected"
+                    advanced_to = "services_selected"
+
+                elif next_phase == "ready_to_confirm":
+                    await advance_to_operator_selected(session.page, bs)
+                    bs.phase = "ready_to_confirm"
+                    advanced_to = "ready_to_confirm"
+
+                elif next_phase == "confirmed":
+                    success = await advance_to_confirmed(session.page, bs)
+                    bs.phase = "confirmed" if success else "ready_to_confirm"
+                    advanced_to = "confirmed"
+        except Exception as e:
+            logger.error(f"❌ Advance failed: {e}")
+            return {
+                "success": False,
+                "error": str(e),
+                "message": f"Advance failed: {e}",
+                "current_phase": bs.phase,
+                "advanced_to": advanced_to
+            }
+
+        return {
+            "success": True,
+            "conversation_id": conversation_id,
+            "context_changed": sync_result["changed"],
+            "previous_phase": sync_result["current_phase"],
+            "current_phase": bs.phase,
+            "advanced_to": advanced_to,
+            "can_advance_again": bs.phase not in ("confirmed", "ready_to_confirm"),
+            "modals_detected": len(modal_report["modals"]),
+            "booking_data": sync_result["booking_data"]
+        }
 
 
 @app.get("/screenshots", response_class=HTMLResponse)

@@ -262,6 +262,214 @@ async def dismiss_system_modals(page, label=""):
     """)
 
 
+async def adaptive_modal_scan(page, label="", auto_dismiss=True):
+    """Scan ALL visible modals, log their content, and optionally dismiss them.
+
+    Returns a dict with:
+      - modals: list of {selector, text, buttons, type, action_taken}
+      - blocking: bool — whether any undismissed modal remains
+    """
+    result = {"modals": [], "blocking": False}
+
+    modals_info = await page.evaluate("""
+        () => {
+            const found = [];
+
+            // 1. Standard system dialog
+            const sysModal = document.getElementById('modale_dialog');
+            if (sysModal && getComputedStyle(sysModal).display !== 'none' && getComputedStyle(sysModal).visibility !== 'hidden') {
+                const testo = sysModal.querySelector('.testo1');
+                const buttons = [];
+                sysModal.querySelectorAll('.button').forEach(b => {
+                    const classes = Array.from(b.classList).join('.');
+                    const txt = b.textContent.trim();
+                    const visible = getComputedStyle(b).display !== 'none';
+                    buttons.push({classes, txt, visible});
+                });
+                found.push({
+                    selector: '#modale_dialog',
+                    type: 'system_dialog',
+                    text: testo ? testo.textContent.trim() : '',
+                    buttons: buttons,
+                    hasConferma: !!sysModal.querySelector('.button.conferma'),
+                    hasChiudi: !!sysModal.querySelector('.button.chiudi'),
+                    hasAvviso: !!sysModal.querySelector('.button.avviso'),
+                    hasOk: !!sysModal.querySelector('.button.ok'),
+                    hasAnnulla: !!sysModal.querySelector('.button.annulla')
+                });
+            }
+
+            // 2. Phone modal
+            const phoneModal = document.querySelector('.modale.card.inserisci_cellulare');
+            if (phoneModal && getComputedStyle(phoneModal).display !== 'none') {
+                found.push({
+                    selector: '.modale.card.inserisci_cellulare',
+                    type: 'phone_input',
+                    text: phoneModal.textContent.trim().substring(0, 200),
+                    buttons: []
+                });
+            }
+
+            // 3. Customer search modal
+            const customerModal = document.querySelector('.cerca_cliente.modale');
+            if (customerModal && getComputedStyle(customerModal).display !== 'none') {
+                found.push({
+                    selector: '.cerca_cliente.modale',
+                    type: 'customer_search',
+                    text: customerModal.textContent.trim().substring(0, 200),
+                    buttons: []
+                });
+            }
+
+            // 4. Customer form modal (new customer)
+            const customerForm = document.querySelector('.form_cliente');
+            if (customerForm && getComputedStyle(customerForm).display !== 'none') {
+                found.push({
+                    selector: '.form_cliente',
+                    type: 'customer_form',
+                    text: customerForm.textContent.trim().substring(0, 200),
+                    buttons: []
+                });
+            }
+
+            // 5. Generic overlays
+            document.querySelectorAll('.modale_overlay, .overlay_modale, .overlay, .modale').forEach(el => {
+                if (getComputedStyle(el).display !== 'none') {
+                    const sel = el.id ? `#${el.id}` : '.' + Array.from(el.classList).join('.');
+                    // Avoid duplicates
+                    if (!found.some(f => f.selector === sel)) {
+                        found.push({
+                            selector: sel,
+                            type: 'generic_overlay',
+                            text: el.textContent.trim().substring(0, 200),
+                            buttons: []
+                        });
+                    }
+                }
+            });
+
+            return found;
+        }
+    """)
+
+    if not modals_info:
+        return result
+
+    for modal in modals_info:
+        modal_entry = {"selector": modal["selector"], "type": modal["type"],
+                       "text": modal["text"][:300], "buttons": modal.get("buttons", []),
+                       "action_taken": None}
+        logger.warning(f"  🚧 MODAL [{modal['type']}] at {modal['selector']}: \"{modal['text'][:150]}\"")
+        if modal.get("buttons"):
+            btn_desc = ", ".join([f"{b['txt']}({b['classes']})" for b in modal["buttons"] if b.get("visible")])
+            if btn_desc:
+                logger.warning(f"    Buttons: {btn_desc}")
+
+        if auto_dismiss:
+            action = await _dismiss_specific_modal(page, modal)
+            modal_entry["action_taken"] = action
+            if action:
+                logger.info(f"  ✅ Dismissed {modal['type']} → {action}")
+            else:
+                logger.warning(f"  ⚠️ Could NOT dismiss {modal['type']} — may be blocking")
+                result["blocking"] = True
+
+        result["modals"].append(modal_entry)
+        await page.wait_for_timeout(500)
+
+    # Cleanup any remaining overlays
+    await page.evaluate("""
+        () => document.querySelectorAll('.modale_overlay, .overlay_modale, .overlay').forEach(el => {
+            if (getComputedStyle(el).display !== 'none') el.style.display = 'none';
+        })
+    """)
+
+    return result
+
+
+async def _dismiss_specific_modal(page, modal_info):
+    """Attempt to dismiss a specific modal based on its type and content."""
+    modal_type = modal_info["type"]
+    modal_text = modal_info.get("text", "").lower()
+    selector = modal_info["selector"]
+
+    # System dialog — try buttons in priority order
+    if modal_type == "system_dialog":
+        clicked = await page.evaluate("""
+            () => {
+                const modal = document.getElementById('modale_dialog');
+                if (!modal) return null;
+                const txt = (modal.querySelector('.testo1')?.textContent || '').toLowerCase();
+
+                // Cash/till modals → annulla
+                if (txt.includes('cassa') || txt.includes('passaggio')) {
+                    const b = modal.querySelector('.button.avviso');
+                    if (b && getComputedStyle(b).display !== 'none') { b.click(); return 'annulla-cassa'; }
+                }
+
+                // Error modals → OK/avviso/conferma/chiudi
+                if (txt.includes('errore') || txt.includes('error') || txt.includes('attenzione') || txt.includes('warning')) {
+                    const ok = modal.querySelector('.button.ok');
+                    if (ok && getComputedStyle(ok).display !== 'none') { ok.click(); return 'ok'; }
+                    const avv = modal.querySelector('.button.avviso');
+                    if (avv && getComputedStyle(avv).display !== 'none') { avv.click(); return 'avviso'; }
+                }
+
+                // Try standard buttons
+                const c = modal.querySelector('.button.conferma');
+                if (c && getComputedStyle(c).display !== 'none') { c.click(); return 'conferma'; }
+                const x = modal.querySelector('.button.chiudi');
+                if (x && getComputedStyle(x).display !== 'none') { x.click(); return 'chiudi'; }
+                const a = modal.querySelector('.button.avviso');
+                if (a && getComputedStyle(a).display !== 'none') { a.click(); return 'avviso'; }
+                const o = modal.querySelector('.button.ok');
+                if (o && getComputedStyle(o).display !== 'none') { o.click(); return 'ok'; }
+                const an = modal.querySelector('.button.annulla');
+                if (an && getComputedStyle(an).display !== 'none') { an.click(); return 'annulla'; }
+
+                // Force hide as last resort
+                modal.style.display = 'none';
+                return 'force-hidden';
+            }
+        """)
+        return clicked
+
+    # Phone modal — fill and confirm
+    if modal_type == "phone_input":
+        return await page.evaluate("""
+            () => {
+                const m = document.querySelector('.modale.card.inserisci_cellulare');
+                if (!m) return null;
+                const inp = m.querySelector('input[name="cellulare"]');
+                const btn = m.querySelector('.button.rimira.primary.conferma') || m.querySelector('.button.conferma');
+                if (btn && getComputedStyle(btn).display !== 'none') { btn.click(); return 'confirmed'; }
+                if (inp && inp.value) { m.style.display = 'none'; return 'force-hidden (has value)'; }
+                m.style.display = 'none';
+                return 'force-hidden';
+            }
+        """)
+
+    # Customer search — just log (handled by booking flow)
+    if modal_type == "customer_search":
+        return None  # Expected modal, not an error
+
+    # Customer form — just log (handled by booking flow)
+    if modal_type == "customer_form":
+        return None  # Expected modal
+
+    # Generic overlay — force hide
+    if modal_type == "generic_overlay":
+        await page.evaluate(f"""
+            () => {{
+                const el = document.querySelector('{selector}');
+                if (el) el.style.display = 'none';
+            }}
+        """)
+        return "force-hidden-generic"
+
+    return None
+
+
 async def get_assigned_pool_session(conversation_id: str) -> Optional['WegestPoolSession']:
     async with pool_lock:
         pool_id = conversation_to_pool_session.get(conversation_id)

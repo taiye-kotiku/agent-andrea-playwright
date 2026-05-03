@@ -127,6 +127,37 @@ class WegestSession:
 
 
 @dataclass
+class BookingState:
+    phase: str = "idle"  # idle, date_selected, time_selected, customer_selected, phone_confirmed, services_selected, ready_to_confirm, confirmed
+    booked_date: str | None = None
+    booked_time: str | None = None
+    booked_operator: str | None = None
+    customer_name: str | None = None
+    customer_id: str | None = None
+    customer_phone: str | None = None
+    services: list = None
+    operator_preference: str | None = None
+    last_context_hash: str | None = None
+
+    def __post_init__(self):
+        if self.services is None:
+            self.services = []
+
+    def context_hash(self) -> str:
+        return str(hash((self.booked_date, self.booked_time, self.customer_name, self.customer_phone, tuple(self.services), self.operator_preference)))
+
+    def changed_from(self, other: 'BookingState') -> bool:
+        if other is None:
+            return True
+        return (self.booked_date != other.booked_date or
+                self.booked_time != other.booked_time or
+                self.customer_name != other.customer_name or
+                self.customer_phone != other.customer_phone or
+                self.services != other.services or
+                self.operator_preference != other.operator_preference)
+
+
+@dataclass
 class WegestPoolSession:
     id: str
     playwright: Any = None
@@ -139,7 +170,11 @@ class WegestPoolSession:
     in_use: bool = False
     assigned_conversation_id: str | None = None
     last_used_at: Optional[datetime] = None
+    booking_state: Optional['BookingState'] = None
+    previous_booking_state: Optional['BookingState'] = None
 
     def __post_init__(self):
         if self.lock is None:
             self.lock = asyncio.Lock()
+        if self.booking_state is None:
+            self.booking_state = BookingState()

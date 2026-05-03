@@ -309,7 +309,6 @@ async def advance_to_time_selected(page, booking_state: BookingState) -> bool:
                 actual_time = f"{hour}:{result.get('minuto', m_try)}"
                 clicked_operator_id = result.get("op")
                 break
-            logger.info(f"⏳ minute {m_try}: {result}")
 
         if not clicked:
             for try_hour in range(raw_hour + 1, 20):
@@ -319,7 +318,6 @@ async def advance_to_time_selected(page, booking_state: BookingState) -> bool:
                     actual_time = f"{try_hour}:{result.get('minuto', '0')}"
                     clicked_operator_id = result.get("op")
                     break
-                logger.info(f"⏳ hour {try_hour}: {result}")
 
     if not clicked:
         raise Exception(f"No available time slot on {booking_state.booked_date}")

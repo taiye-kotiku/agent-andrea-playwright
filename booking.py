@@ -259,7 +259,12 @@ async def advance_to_time_selected(page, booking_state: BookingState) -> bool:
         return f"""
             () => {{
                 const cell = document.querySelector("{base}");
-                if (!cell) return {{ ok: false, reason: 'not_found' }};
+                if (!cell) {{
+                    // Debug: find what's actually available
+                    const all = document.querySelectorAll(".cella[giorno='{day}'][mese='{month}'][anno='{year}'][ora='{h}']");
+                    const available = Array.from(all).filter(c => !c.classList.contains('assente') && !c.classList.contains('occupata'));
+                    return {{ ok: false, reason: 'not_found', selector: "{base}", available_count: available.length, debug: available.map(c => c.getAttribute('id_operatore') + ':' + c.getAttribute('minuto')).join(',') }};
+                }}
                 cell.click();
                 return {{ ok: true, op: cell.getAttribute('id_operatore'), minuto: cell.getAttribute('minuto') }};
             }}

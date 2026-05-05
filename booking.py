@@ -272,35 +272,29 @@ async def advance_to_time_selected(page, booking_state: BookingState) -> bool:
                 if (getComputedStyle(m).display !== 'none') m.style.display = 'none';
             });
         }
-    """);
+    """)
     await asyncio.sleep(1)
 
-    clicked = False
+    time_clicked = False
     actual_time = f"{hour}:{minute}"
     clicked_operator_id = preferred_op_id
 
-    async def click_slot(sel):
-        """Click time slot by injecting a real <script> tag into the DOM."""
-        h, m = hour, minute
-        sel_code = f"jQuery('.cella[ora=\"{h}\"][minuto=\"{m}\"]').first()"
-        eval_code = f"agenda.Apri_Cerca_Cliente({sel_code});"
-        escaped = eval_code.replace('"', '\\"')
-
+    async def click_and_verify(sel):
+        nonlocal time_clicked, actual_time, clicked_operator_id
         for attempt in range(3):
-            await page.evaluate(f"""
-                () => {{
-                    var s = document.createElement('script');
-                    s.textContent = "{escaped}";
-                    document.body.appendChild(s);
-                    setTimeout(function() {{ if (s.parentNode) s.parentNode.removeChild(s); }}, 100);
-                }}
-            """)
-            await asyncio.sleep(1.5)
+            try:
+                await page.click(sel, timeout=5000)
+            except Exception as e:
+                logger.warning(f"page.click attempt {attempt+1} failed: {e}")
+                await asyncio.sleep(1)
+                continue
+            await asyncio.sleep(2)
             modal_open = await page.evaluate("() => { var m = document.querySelector('.cerca_cliente.modale'); return m ? getComputedStyle(m).display : 'none'; }")
             if modal_open == 'flex':
-                return
-        logger.warning(f"⚠️ Script injection failed to open modal")
-        logger.warning(f"⚠️ Failed after 3 attempts. Last state: {result}")
+                return True
+            logger.warning(f"Modal not open after click attempt {attempt+1}")
+            await asyncio.sleep(1)
+        return False
 
     if preferred_op_id:
         logger.info(f"Trying specific operator slot for id_operatore={preferred_op_id}")
@@ -309,45 +303,45 @@ async def advance_to_time_selected(page, booking_state: BookingState) -> bool:
             count = await page.evaluate(f"() => document.querySelectorAll(\"{sel}\").length")
             logger.info(f"Specific op exact count: {count}")
             if count > 0:
-                await click_slot(sel)
-                clicked = True
-                clicked_operator_id = preferred_op_id
-                logger.info(f"✅ Clicked exact slot for preferred operator {preferred_op_id}")
+                if await click_and_verify(sel):
+                    time_clicked = True
+                    clicked_operator_id = preferred_op_id
+                    logger.info(f"✅ Clicked exact slot for preferred operator {preferred_op_id}")
         except Exception as e:
             logger.warning(f"Specific operator exact click failed: {e}")
 
-        if not clicked:
+        if not time_clicked:
             try:
                 sel = hour_selector(op_id=preferred_op_id)
                 count = await page.evaluate(f"() => document.querySelectorAll(\"{sel}\").length")
                 logger.info(f"Specific op hour count: {count}")
                 if count > 0:
                     actual_min = await page.evaluate(f"() => {{ const c = document.querySelector(\"{sel}\"); return c ? c.getAttribute('minuto') : null; }}")
-                    await click_slot(sel)
-                    actual_time = f"{hour}:{actual_min or '0'}"
-                    clicked = True
-                    clicked_operator_id = preferred_op_id
-                    logger.info(f"✅ Clicked same-hour fallback for preferred operator: {actual_time}")
+                    if await click_and_verify(sel):
+                        actual_time = f"{hour}:{actual_min or '0'}"
+                        time_clicked = True
+                        clicked_operator_id = preferred_op_id
+                        logger.info(f"✅ Clicked same-hour fallback for preferred operator: {actual_time}")
             except Exception as e:
                 logger.warning(f"Specific operator hour fallback failed: {e}")
 
-        if not clicked:
+        if not time_clicked:
             for try_hour in range(raw_hour + 1, 20):
                 try:
                     sel = hour_selector(op_id=preferred_op_id, h=str(try_hour))
                     count = await page.evaluate(f"() => document.querySelectorAll(\"{sel}\").length")
                     if count > 0:
                         actual_min = await page.evaluate(f"() => {{ const c = document.querySelector(\"{sel}\"); return c ? c.getAttribute('minuto') : '0'; }}")
-                        await click_slot(sel)
-                        actual_time = f"{try_hour}:{actual_min}"
-                        clicked = True
-                        clicked_operator_id = preferred_op_id
-                        logger.info(f"✅ Clicked next available for preferred operator: {actual_time}")
-                        break
+                        if await click_and_verify(sel):
+                            actual_time = f"{try_hour}:{actual_min}"
+                            time_clicked = True
+                            clicked_operator_id = preferred_op_id
+                            logger.info(f"✅ Clicked next available for preferred operator: {actual_time}")
+                            break
                 except Exception:
                     continue
 
-        if not clicked:
+        if not time_clicked:
             raise Exception(f"No available slot for operator '{booking_state.operator_preference}' on {booking_state.booked_date} around {booking_state.booked_time}")
 
     else:
@@ -359,69 +353,50 @@ async def advance_to_time_selected(page, booking_state: BookingState) -> bool:
             if count > 0:
                 clicked_operator_id = await page.evaluate(f"() => {{ const c = document.querySelector(\"{sel}\"); return c ? c.getAttribute('id_operatore') : null; }}")
                 logger.info(f"✅ First available operator: {clicked_operator_id}")
-                await click_slot(sel)
-                clicked = True
-                logger.info(f"✅ Clicked exact slot for first available operator {clicked_operator_id}")
+                if await click_and_verify(sel):
+                    time_clicked = True
+                    logger.info(f"✅ Clicked exact slot for first available operator {clicked_operator_id}")
         except Exception as e:
             logger.warning(f"Any-op exact click failed: {e}")
 
-        if not clicked:
+        if not time_clicked:
             try:
                 sel = hour_selector()
                 count = await page.evaluate(f"() => document.querySelectorAll(\"{sel}\").length")
                 logger.info(f"Any-op hour count: {count}")
                 if count > 0:
                     result = await page.evaluate(f"() => {{ const c = document.querySelector(\"{sel}\"); return c ? {{minuto: c.getAttribute('minuto'), op: c.getAttribute('id_operatore')}} : null; }}")
-                    await click_slot(sel)
-                    actual_time = f"{hour}:{result['minuto'] if result else '0'}"
-                    clicked_operator_id = result['op'] if result else None
-                    clicked = True
-                    logger.info(f"✅ Clicked same-hour first available: {actual_time} | op={clicked_operator_id}")
+                    if await click_and_verify(sel):
+                        actual_time = f"{hour}:{result['minuto'] if result else '0'}"
+                        clicked_operator_id = result['op'] if result else None
+                        time_clicked = True
+                        logger.info(f"✅ Clicked same-hour first available: {actual_time} | op={clicked_operator_id}")
             except Exception as e:
                 logger.warning(f"Any-op hour fallback failed: {e}")
 
-        if not clicked:
+        if not time_clicked:
             for try_hour in range(raw_hour + 1, 20):
                 try:
                     sel = hour_selector(h=str(try_hour))
                     count = await page.evaluate(f"() => document.querySelectorAll(\"{sel}\").length")
                     if count > 0:
                         result = await page.evaluate(f"() => {{ const c = document.querySelector(\"{sel}\"); return c ? {{minuto: c.getAttribute('minuto'), op: c.getAttribute('id_operatore')}} : null; }}")
-                        await click_slot(sel)
-                        actual_time = f"{try_hour}:{result['minuto'] if result else '0'}"
-                        clicked_operator_id = result['op'] if result else None
-                        clicked = True
-                        logger.info(f"✅ Clicked next available: {actual_time} | op={clicked_operator_id}")
-                        break
+                        if await click_and_verify(sel):
+                            actual_time = f"{try_hour}:{result['minuto'] if result else '0'}"
+                            clicked_operator_id = result['op'] if result else None
+                            time_clicked = True
+                            logger.info(f"✅ Clicked next available: {actual_time} | op={clicked_operator_id}")
+                            break
                 except Exception:
                     continue
 
-    if not clicked:
+    if not time_clicked:
         raise Exception(f"No available time slot on {booking_state.booked_date}")
 
     booking_state.booked_time = actual_time
     booking_state.booked_operator = clicked_operator_id
     logger.info(f"✅ Time selected: {actual_time} | operator={clicked_operator_id}")
-    await asyncio.sleep(5)
-    
-    # Wait for the customer search modal to appear (time slot click opens this directly)
-    logger.info("⏳ Waiting for customer search modal to appear...")
-    
-    try:
-        await page.wait_for_selector('.cerca_cliente.modale input[name="cerca_cliente"]', timeout=15000)
-        logger.info("✅ Customer search modal opened")
-    except:
-        logger.warning("⚠️ Customer search modal not detected, retrying click...")
-        sel = exact_selector(op_id=clicked_operator_id, h=str(hour), m=str(minute))
-        await click_slot(sel)
-        await asyncio.sleep(2)
-        try:
-            await page.wait_for_selector('.cerca_cliente.modale input[name="cerca_cliente"]', timeout=15000)
-            logger.info("✅ Customer search modal opened after retry")
-        except:
-            logger.error("❌ Customer search modal did not open after time selection")
-            raise Exception("Customer search modal failed to open")
-    
+
     # Search for and select the customer
     await page.fill('.cerca_cliente.modale input[name="cerca_cliente"]', 'Taiye Promise');
     await asyncio.sleep(2);  # Wait for search results

@@ -278,10 +278,11 @@ async def advance_to_time_selected(page, booking_state: BookingState) -> bool:
     clicked_operator_id = preferred_op_id
 
     async def click_slot(sel):
-        """Scroll into view then click using Playwright's click with force=True."""
-        escaped = sel.replace("'", "\\'")
-        await page.evaluate(f"document.querySelector('{escaped}')?.scrollIntoView({{block:'center'}})")
-        await page.click(sel, timeout=5000, force=True)
+        """Scroll first matching element into view, wait, then click using Playwright."""
+        loc = page.locator(sel).first
+        await loc.scroll_into_view_if_needed()
+        await asyncio.sleep(0.5)
+        await loc.click(force=True, timeout=5000)
 
     if preferred_op_id:
         logger.info(f"Trying specific operator slot for id_operatore={preferred_op_id}")

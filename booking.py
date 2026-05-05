@@ -280,34 +280,31 @@ async def advance_to_time_selected(page, booking_state: BookingState) -> bool:
     clicked_operator_id = preferred_op_id
 
     async def click_slot(sel):
-        """Set ALL agenda fields and call Apri_Cerca_Cliente directly."""
+        """Click the cell using Playwright's trusted page.click, then verify."""
         h, m = hour, minute
+        try:
+            await page.screenshot(path="/tmp/pre_click.png")
+        except:
+            pass
         for attempt in range(3):
-            result = await page.evaluate("""
-                ({hour, minute}) => {
-                    try {
-                        const cell = $('.cella[ora="' + hour + '"][minuto="' + minute + '"]').first();
-                        if (!cell.length) return {error: 'no cell'};
-                        const opId = cell.attr('id_operatore');
-                        agenda.Form_ID_operatore = opId;
-                        agenda.Form_Orario_Inizio = hour + ':' + minute;
-                        agenda.Form_Nome_Operatore = 'Cliente';
-                        agenda.Apri_Cerca_Cliente(cell);
-                        const modal = document.querySelector('.cerca_cliente.modale');
-                        return {
-                            opId: opId,
-                            modalDisplay: modal ? getComputedStyle(modal).display : 'no-modal'
-                        };
-                    } catch(e) {
-                        return {error: e.message, stack: (e.stack || '').substring(0, 200)};
-                    }
-                }
-            """, {"hour": h, "minute": m})
+            sel_exact = exact_selector(op_id=clicked_operator_id, h=h, m=m)
+            try:
+                loc = page.locator(sel_exact).first
+                await loc.scroll_into_view_if_needed()
+                await asyncio.sleep(0.5)
+                await loc.click(force=True, timeout=5000)
+            except:
+                sel_exact = exact_selector(h=h, m=m)
+                loc = page.locator(sel_exact).first
+                await loc.scroll_into_view_if_needed()
+                await asyncio.sleep(0.5)
+                await loc.click(force=True, timeout=5000)
 
-            if result.get('modalDisplay') == 'flex':
+            await asyncio.sleep(1.5)
+            modal_open = await page.evaluate("() => { var m = document.querySelector('.cerca_cliente.modale'); return m ? getComputedStyle(m).display : 'none'; }")
+            if modal_open == 'flex':
                 return
-            await asyncio.sleep(1)
-        logger.warning(f"⚠️ Failed to open modal: {result}")
+        logger.warning(f"⚠️ Could not open modal after {attempt+1} attempts")
 
     if preferred_op_id:
         logger.info(f"Trying specific operator slot for id_operatore={preferred_op_id}")

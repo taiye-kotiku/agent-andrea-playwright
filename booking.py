@@ -372,26 +372,31 @@ async def advance_to_time_selected(page, booking_state: BookingState) -> bool:
     # After time click, check if customer modal opened - if not, we need to open customer search
     await adaptive_modal_scan(page, "post-time-click")
     
-    # Assume the modal will appear after time selection
+    # Wait for the modal to appear after time selection
     try:
         await page.waitForSelector('.cerca_cliente.modale', { timeout: 5000 });
         logger.info("✅ Customer search modal opened automatically");
     except:
-        # Log a warning if the modal doesn't appear, but continue the flow
-        logger.warning("⚠️ Customer search modal did not open automatically after time selection. Continuing flow...")
+        # Force-trigger the modal if it doesn't open
+        logger.warning("⚠️ Customer search modal did not open automatically. Force-triggering...")
         
-        # Try to trigger the modal via existing buttons
+        # Try to open the modal via the "Nuovo Cliente" button
         await page.evaluate("""() => {
-            const btns = document.querySelectorAll('.button, a.button, [onclick*="cliente"]');
-            for (const btn of btns) {
-                const txt = btn.textContent.toLowerCase();
-                if (txt.includes('cliente') || txt.includes('cerca')) {
-                    btn.click();
-                    return;
-                }
-            }
+            const newClientBtn = document.querySelector('.button.aggiungi');
+            if (newClientBtn) newClientBtn.click();
         }""");
+        
+        # Fallback: Retry clicking the time slot
         await asyncio.sleep(1);
+        await page.click('.cella.inizio_ora[ora="14"][minuto="0"]');  # Adjust time as needed
+        
+        # Verify the modal is now open
+        try:
+            await page.waitForSelector('.cerca_cliente.modale', { timeout: 5000 });
+            logger.info("✅ Customer search modal opened after retry");
+        except:
+            logger.error("❌ Customer search modal still did not open after retry");
+            raise Exception("Customer search modal failed to open");
     
     return True
 

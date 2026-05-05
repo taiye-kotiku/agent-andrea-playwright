@@ -367,34 +367,44 @@ async def advance_to_time_selected(page, booking_state: BookingState) -> bool:
     booking_state.booked_time = actual_time
     booking_state.booked_operator = clicked_operator_id
     logger.info(f"✅ Time selected: {actual_time} | operator={clicked_operator_id}")
-    await asyncio.sleep(2)
+    await asyncio.sleep(3)
     
-    # After time click, check if customer modal opened - if not, we need to open customer search
-    await adaptive_modal_scan(page, "post-time-click")
+    # Verify the modal opened. If not, try force-clicking with JavaScript.
+    modal_open = await page.evaluate("""
+        () => {
+            const m = document.querySelector('.cerca_cliente.modale');
+            return m && getComputedStyle(m).display !== 'none';
+        }
+    """)
     
-    # Wait for the customer search modal to appear (the time slot was already clicked by existing logic)
-    logger.info("⏳ Waiting for customer search modal to appear...");
+    if not modal_open:
+        logger.warning("⚠️ Customer search modal not detected, retrying click with JavaScript...")
+        sel = exact_selector(op_id=clicked_operator_id, h=str(hour), m=str(minute))
+        await page.evaluate(f"""
+            (s) => {{
+                const el = document.querySelector(s);
+                if (el) {{
+                    el.scrollIntoView({{block:'center'}});
+                    const rect = el.getBoundingClientRect();
+                    const cx = rect.left + rect.width/2;
+                    const cy = rect.top + rect.height/2;
+                    ['pointerdown','pointerup','mousedown','mouseup','click'].forEach(type => {{
+                        el.dispatchEvent(new MouseEvent(type, {{view:window,bubbles:true,cancelable:true,clientX:cx,clientY:cy}}));
+                    }});
+                }}
+            }}
+        """, sel)
+        await asyncio.sleep(2)
+    
+    # Wait for the customer search modal to appear
+    logger.info("⏳ Waiting for customer search modal to appear...")
     
     try:
-        await page.wait_for_selector('.cerca_cliente.modale input[name="cerca_cliente"]', timeout=15000);
-        logger.info("✅ Customer search modal opened");
+        await page.wait_for_selector('.cerca_cliente.modale input[name="cerca_cliente"]', timeout=15000)
+        logger.info("✅ Customer search modal opened")
     except:
-        logger.warning("⚠️ Customer search modal did not open after time selection, force-triggering...");
-        await page.evaluate("""
-            () => {
-                const newClientBtn = document.querySelector('.button.aggiungi');
-                if (newClientBtn) newClientBtn.click();
-                if (typeof apriModaleCercaCliente === 'function') {
-                    apriModaleCercaCliente();
-                }
-            }
-        """);
-        try:
-            await page.wait_for_selector('.cerca_cliente.modale input[name="cerca_cliente"]', timeout=10000);
-            logger.info("✅ Customer search modal opened after force-trigger");
-        except:
-            logger.error("❌ Customer search modal still did not open");
-            raise Exception("Customer search modal failed to open");
+        logger.error("❌ Customer search modal did not open after time selection")
+        raise Exception("Customer search modal failed to open")
     
     # Search for and select the customer
     await page.fill('.cerca_cliente.modale input[name="cerca_cliente"]', 'Taiye Promise');

@@ -280,28 +280,20 @@ async def advance_to_time_selected(page, booking_state: BookingState) -> bool:
     clicked_operator_id = preferred_op_id
 
     async def click_slot(sel):
-        """Trigger jQuery click on the time slot cell (confirmed working in manual test)."""
-        result = await page.evaluate(f"""
+        """Open customer search modal by calling agenda.Apri_Cerca_Cliente directly."""
+        logger.info(f"📞 Opening customer search for {hour}:{minute}")
+        await page.evaluate(f"""
             () => {{
-                var cell = $('.cella[ora="{hour}"][minuto="{minute}"]').first();
-                return {{
-                    found: cell.length > 0,
-                    hasJQuery: typeof $ !== 'undefined',
-                    selector: '.cella[ora="{hour}"][minuto="{minute}"]',
-                    hour: '{hour}',
-                    minute: '{minute}',
-                    cellHtml: cell.length ? cell[0].outerHTML.substring(0, 100) : ''
-                }};
+                if (typeof agenda !== 'undefined' && agenda.Apri_Cerca_Cliente) {{
+                    var cell = $('.cella[ora="{hour}"][minuto="{minute}"]').first();
+                    if (cell.length) {{
+                        agenda.Form_ID_operatore = cell.attr('id_operatore');
+                        agenda.Form_Orario_Inizio = '{hour}:{minute}';
+                        agenda.Apri_Cerca_Cliente(cell);
+                    }}
+                }}
             }}
         """)
-        logger.info(f"🔍 jQuery click result: {result}")
-        if result.get("found"):
-            await page.evaluate(f"""
-                () => {{
-                    var cell = $('.cella[ora="{hour}"][minuto="{minute}"]').first();
-                    cell.trigger('click');
-                }}
-            """)
         await asyncio.sleep(2)
 
     if preferred_op_id:

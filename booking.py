@@ -280,20 +280,36 @@ async def advance_to_time_selected(page, booking_state: BookingState) -> bool:
     clicked_operator_id = preferred_op_id
 
     async def click_slot(sel):
-        """Click a time slot by text content (more reliable than CSS selector)."""
-        time_text = f"{hour}:{minute.zfill(2)}" if len(minute) < 2 else f"{hour}:{minute}"
-        loc = page.locator(f'div.cella.inizio_ora:text("{time_text}")').first
+        """Open appointment form by calling WeGest internal function directly."""
         try:
-            await loc.wait_for(state='visible', timeout=5000)
-            logger.info(f"✅ Found slot with text '{time_text}'")
-        except:
-            logger.error(f"❌ Slot with text '{time_text}' not found, falling back to CSS")
+            # Try using Playwright click first
             loc = page.locator(sel).first
-            await loc.wait_for(state='attached', timeout=5000)
-        await loc.scroll_into_view_if_needed()
-        await asyncio.sleep(0.5)
-        await loc.click(force=True, timeout=5000)
-        logger.info(f"✅ Clicked slot")
+            await loc.scroll_into_view_if_needed()
+            await asyncio.sleep(0.5)
+            await loc.click(force=True, timeout=5000)
+            logger.info("✅ Playwright click executed")
+        except Exception as e:
+            logger.warning(f"⚠️ Playwright click failed: {e}")
+
+        await asyncio.sleep(1)
+
+        # Check if modal appeared, if not call the internal function directly
+        modal_visible = await page.evaluate("() => { const m = document.querySelector('.cerca_cliente.modale'); return m && getComputedStyle(m).display !== 'none'; }")
+        if not modal_visible:
+            logger.info("📞 Calling agenda_widget_apri_appuntamento directly")
+            await page.evaluate(f"""
+                () => {{
+                    const slot = document.querySelector('{sel.replace(chr(39), chr(92)+chr(39))}');
+                    if (slot && typeof agenda_widget_apri_appuntamento === 'function') {{
+                        agenda_widget_apri_appuntamento(
+                            '{clicked_operator_id}',
+                            '{year}-{month}-{day}',
+                            '{hour}:{minute}'
+                        );
+                    }}
+                }}
+            """)
+            await asyncio.sleep(2)
 
     if preferred_op_id:
         logger.info(f"Trying specific operator slot for id_operatore={preferred_op_id}")

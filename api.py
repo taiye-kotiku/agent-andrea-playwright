@@ -159,9 +159,24 @@ async def advance_booking_endpoint(request: Request):
                     advanced_to = "date_selected"
 
                 elif next_phase == "time_selected" and bs.booked_time:
-                    await advance_to_time_selected(session.page, bs)
-                    bs.phase = "time_selected"
-                    advanced_to = "time_selected"
+                    try:
+                        await advance_to_time_selected(session.page, bs)
+                        bs.phase = "time_selected"
+                        advanced_to = "time_selected"
+                    except Exception as e:
+                        logger.warning(f"⚠️ Time selection failed, trying AI agent...")
+                        from booking_ai import run_booking
+                        ai_result = await run_booking({
+                            "customer_name": bs.customer_name,
+                            "date": bs.booked_date,
+                            "time": bs.booked_time,
+                            "services": bs.services,
+                        })
+                        if ai_result.get("success"):
+                            bs.phase = "confirmed"
+                            advanced_to = "confirmed"
+                        else:
+                            raise
 
                 elif next_phase == "customer_selected" and bs.customer_name:
                     await advance_to_customer_selected(session.page, bs)
@@ -832,25 +847,6 @@ async def prepare_live_session_endpoint(request: Request, payload: PrepareLiveSe
             "session_ready": False,
             "message": f"No live session available right now: {e}"
         }
-
-
-@app.post("/ai-booking")
-async def ai_booking_endpoint(request: Request):
-    auth = request.headers.get("Authorization") or request.headers.get("authorization") or ""
-    if auth != f"Bearer {API_SECRET}":
-        raise HTTPException(status_code=401, detail="Unauthorized")
-    body = await request.json()
-    from booking_ai import run_booking
-    result = await run_booking({
-        "customer_name": body.get("customer_name", ""),
-        "date": body.get("preferred_date", ""),
-        "time": body.get("preferred_time", ""),
-        "services": body.get("services", []),
-    })
-    if result.get("success"):
-        return {"success": True, "message": "AI booking completed", "details": result}
-    else:
-        return {"success": False, "error": result.get("error", "AI booking failed"), "details": result}
 
 
 @app.on_event("startup")

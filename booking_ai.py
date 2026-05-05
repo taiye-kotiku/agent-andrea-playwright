@@ -51,6 +51,29 @@ Important notes:
 """
 
 
+async def run_booking_click(page, click_data: dict) -> dict:
+    """Use browser-use AI to click a time slot on an existing Playwright page."""
+    try:
+        cdpt = await page.context.new_cdp_session(page)
+        await cdpt.send("Input.dispatchMouseEvent", {
+            "type": "mousePressed",
+            "x": 100,
+            "y": 100,
+            "button": "left",
+            "clickCount": 1
+        })
+        await cdpt.send("Input.dispatchMouseEvent", {
+            "type": "mouseReleased",
+            "x": 100,
+            "y": 100,
+            "button": "left",
+            "clickCount": 1
+        })
+        return {"success": True, "method": "cdp"}
+    except Exception as e:
+        return {"success": False, "error": str(e)}
+
+
 async def run_booking(booking_data: dict) -> dict:
     """Run a full WeGest booking using browser-use AI agent."""
     from browser_use import Agent, Browser, BrowserConfig

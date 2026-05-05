@@ -280,37 +280,36 @@ async def advance_to_time_selected(page, booking_state: BookingState) -> bool:
     clicked_operator_id = preferred_op_id
 
     async def click_slot(sel):
-        """Inject script via addScriptTag then call it."""
+        """Click time slot - first attempt Playwright, fallback to browser-use AI."""
         h, m = hour, minute
-        script_id = "_wegest_booking"
-        await page.addScriptTag(content=f"""
-            window.{script_id} = function() {{
-                try {{
-                    const cell = jQuery('.cella[ora="{h}"][minuto="{m}"]').first();
-                    if (!cell.length) return JSON.stringify({{error: 'cell not found'}});
-                    const events = jQuery._data(cell[0], 'events');
-                    const hasHandler = !!(events && events.click && events.click.length);
-                    if (hasHandler) {{
-                        agenda.Form_ID_operatore = cell.attr('id_operatore');
-                        agenda.Form_Orario_Inizio = '{h}:{m}';
-                        agenda.Form_Nome_Operatore = 'Script';
-                        agenda.Apri_Cerca_Cliente(cell);
-                        const modal = document.querySelector('.cerca_cliente.modale');
-                        const display = modal ? getComputedStyle(modal).display : 'no-modal';
-                        return JSON.stringify({{called: true, display: display, opId: cell.attr('id_operatore')}});
-                    }}
-                    return JSON.stringify({{error: 'no handler', hasHandler: hasHandler}});
-                }} catch(e) {{
-                    return JSON.stringify({{error: e.message, stack: (e.stack||'').substring(0,200)}});
-                }}
-            }};
-        """)
-        await asyncio.sleep(0.5)
-        result = await page.evaluate(f"JSON.parse({script_id}())")
-        if result.get('display') == 'flex':
+
+        # Try Playwright approach first
+        loc = page.locator(sel).first
+        try:
+            await loc.scroll_into_view_if_needed()
+            await asyncio.sleep(0.5)
+            await loc.click(force=True, timeout=5000)
+        except:
+            pass
+        await asyncio.sleep(1.5)
+
+        modal_open = await page.evaluate("() => { const m = document.querySelector('.cerca_cliente.modale'); return m ? getComputedStyle(m).display : 'none'; }")
+        if modal_open == 'flex':
             return
-        logger.warning(f"⚠️ addScriptTag result: {result}")
-        await asyncio.sleep(2)
+
+        # Playwright failed - use browser-use AI for just the click
+        logger.warning("⚠️ Playwright click failed, falling back to browser-use AI...")
+        try:
+            from booking_ai import run_booking_click
+            ai_result = await run_booking_click(page, {
+                "time": f"{h}:{m}",
+                "operator_id": clicked_operator_id,
+            })
+            if ai_result.get("success"):
+                logger.info("✅ AI click succeeded")
+                return
+        except Exception as e:
+            logger.error(f"❌ AI click also failed: {e}")
         logger.warning(f"⚠️ Failed after 3 attempts. Last state: {result}")
 
     if preferred_op_id:

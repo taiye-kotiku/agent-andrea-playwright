@@ -605,7 +605,7 @@ async def advance_to_phone_confirmed(page, booking_state: BookingState) -> bool:
             m.remove();
             return { visible: true, dismissed: true };
         }
-    """")
+    """)
 
     if result.get("visible"):
         logger.info(f"📱 Phone modal dismissed: {result}")

@@ -372,95 +372,25 @@ async def advance_to_time_selected(page, booking_state: BookingState) -> bool:
     # After time click, check if customer modal opened - if not, we need to open customer search
     await adaptive_modal_scan(page, "post-time-click")
     
-    # Click the time slot to open the customer search modal
-    logger.info("🕒 Clicking time slot to open customer search modal...");
+    # Wait for the customer search modal to appear (the time slot was already clicked by existing logic)
+    logger.info("⏳ Waiting for customer search modal to appear...");
     
-    # Define the date and time for the booking
-    giorno = "5";  # Day
-    mese = "5";    # Month
-    anno = "2026"; # Year
-    ora = "14";    # Hour
-    minuto = "0";  # Minute
-    operator_id = "29093";  # First available operator
-    
-    # Use a more specific selector for the time slot
-    time_slot_selector = f'div.cella.inizio_ora[ora="{ora}"][minuto="{minuto}"][giorno="{giorno}"][mese="{mese}"][anno="{anno}"][id_operatore="{operator_id}"]';
-    
-    # Debug: Log whether the time slot exists
-    time_slot_exists = await page.evaluate(f"""
-        (selector) => {{
-            const timeSlot = document.querySelector(selector);
-            return !!timeSlot;
-        }}
-    """, time_slot_selector);
-    
-    if not time_slot_exists:
-        logger.error(f"❌ Time slot not found: {time_slot_selector}");
-        raise Exception("Time slot not found");
-    
-    # Scroll the time slot into view
-    await page.evaluate(f"""
-        (selector) => {
-            const timeSlot = document.querySelector(selector);
-            if (timeSlot) {
-                timeSlot.scrollIntoView({ behavior: 'auto', block: 'center', inline: 'center' });
-            }
-        }
-    """, time_slot_selector);
-    
-    # Click the time slot with Playwright
     try:
-        await page.click(time_slot_selector, timeout=10000);
-        logger.info("✅ Time slot clicked successfully");
-    except Exception as e:
-        logger.warning(f"⚠️ Playwright click failed: {e}. Falling back to JavaScript");
-        
-        # Fallback: Simulate a click with JavaScript
-        await page.evaluate(f"""
-            (selector) => {
-                const timeSlot = document.querySelector(selector);
-                if (timeSlot) {
-                    const rect = timeSlot.getBoundingClientRect();
-                    const clientX = rect.left + rect.width / 2;
-                    const clientY = rect.top + rect.height / 2;
-                    
-                    ['mousedown', 'mouseup', 'click', 'pointerdown', 'pointerup'].forEach(event => {
-                        const evt = new MouseEvent(event, {
-                            view: window,
-                            bubbles: true,
-                            cancelable: true,
-                            clientX: clientX,
-                            clientY: clientY
-                        });
-                        timeSlot.dispatchEvent(evt);
-                    });
-                }
-            }
-        """, time_slot_selector);
-    
-    # Wait for the customer search modal to appear
-    try:
-        await page.waitForSelector('.cerca_cliente.modale', { timeout: 10000 });
-        logger.info("✅ Customer search modal opened automatically");
+        await page.wait_for_selector('.cerca_cliente.modale input[name="cerca_cliente"]', timeout=15000);
+        logger.info("✅ Customer search modal opened");
     except:
-        # Final fallback: Force-trigger the modal via JavaScript
-        logger.warning("⚠️ Customer search modal did not open after time slot click, force-triggering...");
+        logger.warning("⚠️ Customer search modal did not open after time selection, force-triggering...");
         await page.evaluate("""
             () => {
-                // Try to trigger the modal via the "Nuovo Cliente" button
                 const newClientBtn = document.querySelector('.button.aggiungi');
                 if (newClientBtn) newClientBtn.click();
-                
-                // Fallback: Directly call the modal function if available
                 if (typeof apriModaleCercaCliente === 'function') {
                     apriModaleCercaCliente();
                 }
             }
         """);
-        
-        # Verify the modal is now open
         try:
-            await page.waitForSelector('.cerca_cliente.modale', { timeout: 5000 });
+            await page.wait_for_selector('.cerca_cliente.modale input[name="cerca_cliente"]', timeout=10000);
             logger.info("✅ Customer search modal opened after force-trigger");
         except:
             logger.error("❌ Customer search modal still did not open");

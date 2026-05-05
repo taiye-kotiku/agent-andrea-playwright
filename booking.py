@@ -375,8 +375,12 @@ async def advance_to_time_selected(page, booking_state: BookingState) -> bool:
     # Click the time slot to open the customer search modal
     logger.info("🕒 Clicking time slot to open customer search modal...");
     
-    # Use Playwright's locator to find the time slot
-    time_slot = page.locator('.cella.inizio_ora[ora="14"][minuto="0"]');
+    # Use the first available operator (29093) to target the specific time slot
+    operator_id = "29093";
+    time_slot_selector = f'.cella.inizio_ora[ora="14"][minuto="0"][id_operatore="{operator_id}"]';
+    
+    # Use Playwright's locator to find the time slot for the specific operator
+    time_slot = page.locator(time_slot_selector);
     
     # Wait for the time slot to be visible and enabled
     await time_slot.wait_for(state='visible', timeout=10000);
@@ -395,26 +399,26 @@ async def advance_to_time_selected(page, booking_state: BookingState) -> bool:
     except:
         # Fallback: Simulate a click with JavaScript
         logger.warning("⚠️ Playwright click failed, simulating click with JavaScript");
-        await page.evaluate("""
-            () => {
-                const timeSlot = document.querySelector('.cella.inizio_ora[ora="14"][minuto="0"]');
-                if (timeSlot) {
+        await page.evaluate(f"""
+            () => {{
+                const timeSlot = document.querySelector('{time_slot_selector}');
+                if (timeSlot) {{
                     const rect = timeSlot.getBoundingClientRect();
                     const clientX = rect.left + rect.width / 2;
                     const clientY = rect.top + rect.height / 2;
                     
-                    ['mousedown', 'mouseup', 'click', 'pointerdown', 'pointerup'].forEach(event => {
-                        const evt = new MouseEvent(event, {
+                    ['mousedown', 'mouseup', 'click', 'pointerdown', 'pointerup'].forEach(event => {{
+                        const evt = new MouseEvent(event, {{
                             view: window,
                             bubbles: true,
                             cancelable: true,
                             clientX: clientX,
                             clientY: clientY
-                        });
+                        }});
                         timeSlot.dispatchEvent(evt);
-                    });
-                }
-            }
+                    }});
+                }}
+            }}
         """);
         
         # Fallback: Trigger the modal via JavaScript if the click fails

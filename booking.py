@@ -280,31 +280,32 @@ async def advance_to_time_selected(page, booking_state: BookingState) -> bool:
     clicked_operator_id = preferred_op_id
 
     async def click_slot(sel):
-        """Trigger jQuery click on time slot cell (confirmed working in console). Retry with delays."""
+        """Trigger jQuery click on time slot cell by passing params safely."""
+        h, m = hour, minute
         for attempt in range(3):
-            logger.info(f"🔄 Attempt {attempt+1} to open customer search for {hour}:{minute}")
-            modal_before = await page.evaluate("() => { var m = document.querySelector('.cerca_cliente.modale'); return m ? getComputedStyle(m).display : 'none'; }")
+            logger.info(f"🔄 Attempt {attempt+1} to open customer search for {h}:{m}")
+            modal_before = await page.evaluate("() => { var md = document.querySelector('.cerca_cliente.modale'); return md ? getComputedStyle(md).display : 'none'; }")
 
-            await page.evaluate(f"""
-                () => {{
-                    var cell = $('.cella[ora="{hour}"][minuto="{minute}"]').first();
-                    if (cell.length) {{
+            clicked = await page.evaluate("""
+                ({hour, minute}) => {
+                    const cell = $('.cella[ora="' + hour + '"][minuto="' + minute + '"]').first();
+                    if (cell.length) {
                         cell.trigger('click');
-                    }}
-                }}
-            """)
+                        return true;
+                    }
+                    return false;
+                }
+            """, {"hour": h, "minute": m})
 
             await asyncio.sleep(1.5)
 
-            modal_after = await page.evaluate("() => { var m = document.querySelector('.cerca_cliente.modale'); return m ? getComputedStyle(m).display : 'none'; }")
-            logger.info(f"  Modal state: before={modal_before} after={modal_after}")
+            modal_after = await page.evaluate("() => { var md = document.querySelector('.cerca_cliente.modale'); return md ? getComputedStyle(md).display : 'none'; }")
+            logger.info(f"  Cell clicked={clicked} modal: {modal_before} -> {modal_after}")
 
             if modal_after == 'flex':
                 logger.info("✅ Customer search modal opened!")
                 return
-            else:
-                logger.info(f"  Retrying...")
-                await asyncio.sleep(1)
+
         logger.warning("⚠️ Could not open customer search modal after 3 attempts")
 
     if preferred_op_id:

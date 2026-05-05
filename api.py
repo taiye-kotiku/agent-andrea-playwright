@@ -207,6 +207,8 @@ async def advance_booking_endpoint(request: Request):
                 await dump_html(session.page, f"advance_booking_error_{conversation_id}")
         except Exception:
             pass
+        # Return session to pool so service stays usable
+        await return_session_to_pool(conversation_id)
         return {
             "success": False,
             "error": str(e),

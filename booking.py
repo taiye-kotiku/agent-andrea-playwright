@@ -281,7 +281,8 @@ async def advance_to_time_selected(page, booking_state: BookingState) -> bool:
 
     async def click_slot(sel):
         """Scroll into view then click using Playwright's click with force=True."""
-        await page.evaluate(f"document.querySelector('{sel}')?.scrollIntoView({{block:'center'}})")
+        escaped = sel.replace("'", "\\'")
+        await page.evaluate(f"document.querySelector('{escaped}')?.scrollIntoView({{block:'center'}})")
         await page.click(sel, timeout=5000, force=True)
 
     if preferred_op_id:

@@ -280,9 +280,8 @@ async def advance_to_time_selected(page, booking_state: BookingState) -> bool:
     clicked_operator_id = preferred_op_id
 
     async def click_slot(sel):
-        """Open appointment form by calling WeGest internal function directly."""
+        """Open appointment form using jQuery trigger (WeGest uses jQuery)."""
         try:
-            # Try using Playwright click first
             loc = page.locator(sel).first
             await loc.scroll_into_view_if_needed()
             await asyncio.sleep(0.5)
@@ -293,19 +292,19 @@ async def advance_to_time_selected(page, booking_state: BookingState) -> bool:
 
         await asyncio.sleep(1)
 
-        # Check if modal appeared, if not call the internal function directly
         modal_visible = await page.evaluate("() => { const m = document.querySelector('.cerca_cliente.modale'); return m && getComputedStyle(m).display !== 'none'; }")
         if not modal_visible:
-            logger.info("📞 Calling agenda_widget_apri_appuntamento directly")
+            logger.info("📞 Triggering click via jQuery...")
             await page.evaluate(f"""
                 () => {{
                     const slot = document.querySelector('{sel.replace(chr(39), chr(92)+chr(39))}');
-                    if (slot && typeof agenda_widget_apri_appuntamento === 'function') {{
-                        agenda_widget_apri_appuntamento(
-                            '{clicked_operator_id}',
-                            '{year}-{month}-{day}',
-                            '{hour}:{minute}'
-                        );
+                    if (slot) {{
+                        if (window.$) {{
+                            $(slot).trigger('click');
+                            $(slot).trigger('mousedown');
+                            $(slot).trigger('mouseup');
+                        }}
+                        slot.dispatchEvent(new MouseEvent('click', {{bubbles:true,cancelable:true,view:window}}));
                     }}
                 }}
             """)

@@ -159,24 +159,9 @@ async def advance_booking_endpoint(request: Request):
                     advanced_to = "date_selected"
 
                 elif next_phase == "time_selected" and bs.booked_time:
-                    try:
-                        await advance_to_time_selected(session.page, bs)
-                        bs.phase = "time_selected"
-                        advanced_to = "time_selected"
-                    except Exception as e:
-                        logger.warning(f"⚠️ Time selection failed, trying AI agent...")
-                        from booking_ai import run_booking
-                        ai_result = await run_booking({
-                            "customer_name": bs.customer_name,
-                            "date": bs.booked_date,
-                            "time": bs.booked_time,
-                            "services": bs.services,
-                        })
-                        if ai_result.get("success"):
-                            bs.phase = "confirmed"
-                            advanced_to = "confirmed"
-                        else:
-                            raise
+                    await advance_to_time_selected(session.page, bs)
+                    bs.phase = "time_selected"
+                    advanced_to = "time_selected"
 
                 elif next_phase == "customer_selected" and bs.customer_name:
                     await advance_to_customer_selected(session.page, bs)

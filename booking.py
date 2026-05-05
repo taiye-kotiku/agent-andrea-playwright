@@ -280,36 +280,26 @@ async def advance_to_time_selected(page, booking_state: BookingState) -> bool:
     clicked_operator_id = preferred_op_id
 
     async def click_slot(sel):
-        """Click time slot - first attempt Playwright, fallback to browser-use AI."""
+        """Click time slot by injecting a real <script> tag into the DOM."""
         h, m = hour, minute
+        sel_code = f"jQuery('.cella[ora=\"{h}\"][minuto=\"{m}\"]').first()"
+        eval_code = f"agenda.Apri_Cerca_Cliente({sel_code});"
+        escaped = eval_code.replace('"', '\\"')
 
-        # Try Playwright approach first
-        loc = page.locator(sel).first
-        try:
-            await loc.scroll_into_view_if_needed()
-            await asyncio.sleep(0.5)
-            await loc.click(force=True, timeout=5000)
-        except:
-            pass
-        await asyncio.sleep(1.5)
-
-        modal_open = await page.evaluate("() => { const m = document.querySelector('.cerca_cliente.modale'); return m ? getComputedStyle(m).display : 'none'; }")
-        if modal_open == 'flex':
-            return
-
-        # Playwright failed - use browser-use AI for just the click
-        logger.warning("⚠️ Playwright click failed, falling back to browser-use AI...")
-        try:
-            from booking_ai import run_booking_click
-            ai_result = await run_booking_click(page, {
-                "time": f"{h}:{m}",
-                "operator_id": clicked_operator_id,
-            })
-            if ai_result.get("success"):
-                logger.info("✅ AI click succeeded")
+        for attempt in range(3):
+            await page.evaluate(f"""
+                () => {{
+                    var s = document.createElement('script');
+                    s.textContent = "{escaped}";
+                    document.body.appendChild(s);
+                    setTimeout(function() {{ if (s.parentNode) s.parentNode.removeChild(s); }}, 100);
+                }}
+            """)
+            await asyncio.sleep(1.5)
+            modal_open = await page.evaluate("() => { var m = document.querySelector('.cerca_cliente.modale'); return m ? getComputedStyle(m).display : 'none'; }")
+            if modal_open == 'flex':
                 return
-        except Exception as e:
-            logger.error(f"❌ AI click also failed: {e}")
+        logger.warning(f"⚠️ Script injection failed to open modal")
         logger.warning(f"⚠️ Failed after 3 attempts. Last state: {result}")
 
     if preferred_op_id:

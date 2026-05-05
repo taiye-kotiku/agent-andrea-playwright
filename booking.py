@@ -281,9 +281,10 @@ async def advance_to_time_selected(page, booking_state: BookingState) -> bool:
 
     async def click_slot(sel):
         """Scroll to element, then trigger jQuery click handler directly."""
+        escaped = sel.replace("'", "\\'")
         await page.evaluate(f"""
             () => {{
-                var cell = $('{sel.replace(chr(39), chr(92)+chr(39))}').first();
+                var cell = $('{escaped}').first();
                 if (cell.length) {{
                     cell.trigger('click');
                 }}

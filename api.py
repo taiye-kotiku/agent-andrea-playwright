@@ -6,7 +6,7 @@ from fastapi import FastAPI, HTTPException, Request
 from fastapi.responses import HTMLResponse
 from fastapi.middleware.gzip import GZipMiddleware
 import config
-from config import app, API_SECRET, DEBUG_SCREENSHOTS, screenshots, html_dumps, logger, booking_lock
+from config import app, API_SECRET, screenshots, html_dumps, logger, booking_lock
 
 app.add_middleware(GZipMiddleware, minimum_size=1000)
 from api_models import (

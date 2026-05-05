@@ -372,9 +372,9 @@ async def advance_to_time_selected(page, booking_state: BookingState) -> bool:
     # After time click, check if customer modal opened - if not, we need to open customer search
     await adaptive_modal_scan(page, "post-time-click")
     
-    # Wait for the modal to appear after time selection
+    # Wait for the customer search modal to appear after time selection
     try:
-        await page.waitForSelector('.cerca_cliente.modale', { timeout: 5000 });
+        await page.waitForSelector('.cerca_cliente.modale', { timeout: 10000 });
         logger.info("✅ Customer search modal opened automatically");
     except:
         # Force-trigger the modal if it doesn't open
@@ -411,47 +411,50 @@ async def advance_to_time_selected(page, booking_state: BookingState) -> bool:
         
         # Verify the modal is now open
         try:
-            await page.waitForSelector('.cerca_cliente.modale', { timeout: 5000 });
+            await page.waitForSelector('.cerca_cliente.modale', { timeout: 10000 });
             logger.info("✅ Customer search modal opened after retry");
         except:
             logger.error("❌ Customer search modal still did not open after retry");
-            
-            # Final fallback: Create a minimal modal and proceed with booking
-            logger.warning("⚠️ Creating minimal customer search modal to proceed with booking");
-            await page.evaluate("""
-                () => {
-                    if (!document.querySelector('.cerca_cliente.modale')) {
-                        const modal = document.createElement('div');
-                        modal.className = 'cerca_cliente modale';
-                        modal.innerHTML = `\
-                        <div class="modale_body">\
-                            <input name="cerca_cliente" placeholder="Cerca per nome, cellulare o fidelity card" value="Taiye Promise">\
-                            <div class="tabella_clienti">\
-                                <table id="tabella_clienti">\
-                                    <tbody>\
-                                        <tr id="9054932">\
-                                            <td><p class="cliente">Taiye Promise</p></td>\
-                                            <td><span>+2348080608957</span></td>\
-                                        </tr>\
-                                    </tbody>\
-                                </table>\
-                            </div>\
-                            <div class="pulsanti">\
-                                <button class="button chiudi">Chiudi</button>\
-                                <button class="button aggiungi">Nuovo Cliente</button>\
-                            </div>\
-                        </div>`;
-                        document.body.appendChild(modal);
-                        
-                        // Auto-select the first client
-                        setTimeout(() => {
-                            const firstRow = document.querySelector('#tabella_clienti tbody tr');
-                            if (firstRow) firstRow.click();
-                        }, 500);
-                    }
-                }
-            """);
-            await page.waitForTimeout(1000);
+            raise Exception("Customer search modal failed to open");
+    
+    # Search for and select the customer
+    await page.fill('.cerca_cliente.modale input[name="cerca_cliente"]', 'Taiye Promise');
+    await asyncio.sleep(2);  # Wait for search results
+    
+    # Select the first customer in the results
+    await page.evaluate("""
+        () => {
+            const firstRow = document.querySelector('#tabella_clienti tbody tr');
+            if (firstRow) firstRow.click();
+        }
+    """);
+    logger.info("✅ Customer selected");
+    
+    # Proceed to service selection in the same modal
+    logger.info("🛠️ Selecting services: ['taglio', 'colore']");
+    for service in ['taglio', 'colore']:
+        logger.info(f"  Service: {service}");
+        
+        # Search for the service
+        await page.fill('.pulsanti_tab input[name="cerca_servizio"]', service);
+        await asyncio.sleep(1);
+        
+        # Click the first matching service
+        await page.evaluate(f"""
+            () => {{
+                const services = Array.from(document.querySelectorAll('.pulsanti_tab .servizio'));
+                const match = services.find(s => 
+                    s.textContent.toLowerCase().includes('{service}')
+                );
+                if (match) match.click();
+            }}
+        """);
+        await asyncio.sleep(1);
+    
+    # Confirm the booking
+    logger.info("🏁 Confirming booking...");
+    await page.click('.azioni .button.rimira.primary.aggiungi');
+    await asyncio.sleep(3);  # Wait for confirmation
     
     return True
 

@@ -264,14 +264,13 @@ async def advance_to_time_selected(page, booking_state: BookingState) -> bool:
         base += ":not(.assente):not(.occupata)"
         return base
 
-    # Close any stale form modal left from pool warmup by clicking the close button
+    # Close any stale modals left from pool warmup
     await page.evaluate("""
         () => {
-            const f = document.querySelector('.form_appuntamento');
-            if (f && getComputedStyle(f).display !== 'none') {
-                const closeBtn = f.querySelector('.button.chiudi');
-                if (closeBtn) closeBtn.click();
-            }
+            const modals = document.querySelectorAll('.form_appuntamento, .cerca_cliente.modale');
+            modals.forEach(m => {
+                if (getComputedStyle(m).display !== 'none') m.style.display = 'none';
+            });
         }
     """);
     await asyncio.sleep(1)
@@ -389,55 +388,23 @@ async def advance_to_time_selected(page, booking_state: BookingState) -> bool:
     logger.info(f"✅ Time selected: {actual_time} | operator={clicked_operator_id}")
     await asyncio.sleep(3)
     
-    # Wait for the appointment form modal to appear (the time slot click opens this)
-    logger.info("⏳ Waiting for appointment form modal to appear...")
+    # Wait for the customer search modal to appear (time slot click opens this directly)
+    logger.info("⏳ Waiting for customer search modal to appear...")
     
     try:
-        await page.wait_for_selector('.form_appuntamento', timeout=15000)
-        logger.info("✅ Appointment form modal opened")
+        await page.wait_for_selector('.cerca_cliente.modale input[name="cerca_cliente"]', timeout=15000)
+        logger.info("✅ Customer search modal opened")
     except:
-        logger.warning("⚠️ Appointment form not detected, retrying click...")
+        logger.warning("⚠️ Customer search modal not detected, retrying click...")
         sel = exact_selector(op_id=clicked_operator_id, h=str(hour), m=str(minute))
         await click_slot(sel)
         await asyncio.sleep(2)
         try:
-            await page.wait_for_selector('.form_appuntamento', timeout=15000)
-            logger.info("✅ Appointment form modal opened after retry")
+            await page.wait_for_selector('.cerca_cliente.modale input[name="cerca_cliente"]', timeout=15000)
+            logger.info("✅ Customer search modal opened after retry")
         except:
-            logger.error("❌ Appointment form modal did not open after time selection")
-            raise Exception("Appointment form modal failed to open")
-    
-    # The form already has customer search available. Try to open the search modal.
-    logger.info("⏳ Opening customer search inside form...")
-    await page.evaluate("""
-        () => {
-            // Try to find the customer search trigger in the form
-            const triggers = [
-                '.form_appuntamento .header_text, .form_appuntamento .cerca_cliente_btn',
-                '.form_appuntamento input[name="cerca_cliente"]',
-                '.form_appuntamento [onclick*="cliente"]',
-                '.form_appuntamento .button:not(.chiudi)'
-            ];
-            for (const sel of triggers) {
-                const el = document.querySelector(sel);
-                if (el && getComputedStyle(el).display !== 'none') {
-                    el.click();
-                    return;
-                }
-            }
-            // Fallback: click anywhere in the form to activate it
-            const form = document.querySelector('.form_appuntamento');
-            if (form) form.click();
-        }
-    """)
-    await asyncio.sleep(1)
-    
-    try:
-        await page.wait_for_selector('.cerca_cliente.modale input[name="cerca_cliente"]', timeout=10000)
-        logger.info("✅ Customer search modal opened inside form")
-    except:
-        # Customer search might already be active inside the form directly
-        logger.info("⚠️ Customer search modal not triggered, proceeding with form interaction")
+            logger.error("❌ Customer search modal did not open after time selection")
+            raise Exception("Customer search modal failed to open")
     
     # Search for and select the customer
     await page.fill('.cerca_cliente.modale input[name="cerca_cliente"]', 'Taiye Promise');

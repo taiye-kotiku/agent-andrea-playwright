@@ -280,28 +280,20 @@ async def advance_to_time_selected(page, booking_state: BookingState) -> bool:
     clicked_operator_id = preferred_op_id
 
     async def click_slot(sel):
-        """Scroll element, wait, then click using Playwright mouse API with coordinates."""
-        count_before = await page.evaluate(f"() => document.querySelectorAll(\"{sel}\").length")
-        logger.info(f"🔍 click_slot: selector matches {count_before} elements")
-        loc = page.locator(sel).first
+        """Click a time slot by text content (more reliable than CSS selector)."""
+        time_text = f"{hour}:{minute.zfill(2)}" if len(minute) < 2 else f"{hour}:{minute}"
+        loc = page.locator(f'div.cella.inizio_ora:text("{time_text}")').first
         try:
-            await loc.wait_for(state='attached', timeout=5000)
-            logger.info("✅ Element attached to DOM")
+            await loc.wait_for(state='visible', timeout=5000)
+            logger.info(f"✅ Found slot with text '{time_text}'")
         except:
-            logger.error("❌ Element not found in DOM")
-            raise
+            logger.error(f"❌ Slot with text '{time_text}' not found, falling back to CSS")
+            loc = page.locator(sel).first
+            await loc.wait_for(state='attached', timeout=5000)
         await loc.scroll_into_view_if_needed()
-        await asyncio.sleep(1)
-        visible = await loc.is_visible()
-        enabled = await loc.is_enabled()
-        logger.info(f"📏 Element: visible={visible}, enabled={enabled}")
-        box = await loc.bounding_box()
-        if box:
-            logger.info(f"📐 Bounding box: x={box['x']:.0f} y={box['y']:.0f} w={box['width']:.0f} h={box['height']:.0f}")
-            await page.mouse.click(box['x'] + box['width'] / 2, box['y'] + box['height'] / 2)
-        else:
-            logger.warning("⚠️ No bounding box, using force click")
-            await loc.click(force=True, timeout=5000)
+        await asyncio.sleep(0.5)
+        await loc.click(force=True, timeout=5000)
+        logger.info(f"✅ Clicked slot")
 
     if preferred_op_id:
         logger.info(f"Trying specific operator slot for id_operatore={preferred_op_id}")

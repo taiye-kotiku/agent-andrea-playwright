@@ -377,9 +377,11 @@ async def advance_to_time_selected(page, booking_state: BookingState) -> bool:
     
     # Get the time slot element and scroll it into view
     time_slot = await page.waitForSelector('.cella.inizio_ora[ora="14"][minuto="0"]', { timeout: 10000 });
-    await time_slot.evaluate((element) => {
-        element.scrollIntoView({ behavior: 'auto', block: 'center', inline: 'center' });
-    });
+    await time_slot.evaluate("""
+        (element) => {
+            element.scrollIntoView({ behavior: 'auto', block: 'center', inline: 'center' });
+        }
+    """);
     
     # Ensure the time slot is visible and enabled
     await page.evaluate("""

@@ -280,27 +280,22 @@ async def advance_to_time_selected(page, booking_state: BookingState) -> bool:
     clicked_operator_id = preferred_op_id
 
     async def click_slot(sel):
-        """Open modal by calling agenda.Apri_Cerca_Cliente with a proper jQuery event."""
+        """Open modal by calling agenda.Apri_Cerca_Cliente directly."""
         h, m = hour, minute
         for attempt in range(3):
             result = await page.evaluate("""
                 ({hour, minute, opId}) => {
                     try {
-                        const cell = $('.cella[ora="' + hour + '"][minuto="' + minute + '"]').first();
+                        const cell = jQuery('.cella[ora="' + hour + '"][minuto="' + minute + '"]').first();
                         if (!cell.length) return {error: 'cell not found'};
-                        const ev = $.Event('click');
-                        ev.target = cell[0];
                         agenda.Form_ID_operatore = opId;
                         agenda.Form_Orario_Inizio = hour + ':' + minute;
                         agenda.Form_Nome_Operatore = 'Operatore';
                         agenda.Apri_Cerca_Cliente(cell);
                         const modal = document.querySelector('.cerca_cliente.modale');
-                        return {
-                            modalDisplay: modal ? getComputedStyle(modal).display : 'no-modal',
-                            opId: opId
-                        };
+                        return {modalDisplay: modal ? getComputedStyle(modal).display : 'no-modal', opId: opId};
                     } catch(e) {
-                        return {error: e.message};
+                        return {error: e.message, stack: (e.stack || '').substring(0, 300)};
                     }
                 }
             """, {"hour": h, "minute": m, "opId": clicked_operator_id or "29093"})

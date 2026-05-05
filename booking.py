@@ -375,6 +375,12 @@ async def advance_to_time_selected(page, booking_state: BookingState) -> bool:
     # Click the time slot to open the customer search modal
     logger.info("🕒 Clicking time slot to open customer search modal...");
     
+    # Get the time slot element and scroll it into view
+    time_slot = await page.waitForSelector('.cella.inizio_ora[ora="14"][minuto="0"]', { timeout: 10000 });
+    await time_slot.evaluate((element) => {
+        element.scrollIntoView({ behavior: 'auto', block: 'center', inline: 'center' });
+    });
+    
     # Ensure the time slot is visible and enabled
     await page.evaluate("""
         () => {
@@ -389,7 +395,7 @@ async def advance_to_time_selected(page, booking_state: BookingState) -> bool:
     
     # Click the time slot with Playwright
     try:
-        await page.click('.cella.inizio_ora[ora="14"][minuto="0"]', timeout=10000);
+        await time_slot.click({ timeout: 10000 });
         logger.info("✅ Time slot clicked successfully");
     except:
         # Fallback: Simulate a click with JavaScript
@@ -398,13 +404,17 @@ async def advance_to_time_selected(page, booking_state: BookingState) -> bool:
             () => {
                 const timeSlot = document.querySelector('.cella.inizio_ora[ora="14"][minuto="0"]');
                 if (timeSlot) {
-                    ['click', 'mousedown', 'mouseup', 'pointerdown', 'pointerup'].forEach(event => {
+                    const rect = timeSlot.getBoundingClientRect();
+                    const clientX = rect.left + rect.width / 2;
+                    const clientY = rect.top + rect.height / 2;
+                    
+                    ['mousedown', 'mouseup', 'click', 'pointerdown', 'pointerup'].forEach(event => {
                         const evt = new MouseEvent(event, {
                             view: window,
                             bubbles: true,
                             cancelable: true,
-                            clientX: timeSlot.getBoundingClientRect().left + 10,
-                            clientY: timeSlot.getBoundingClientRect().top + 10
+                            clientX: clientX,
+                            clientY: clientY
                         });
                         timeSlot.dispatchEvent(evt);
                     });
@@ -417,9 +427,28 @@ async def advance_to_time_selected(page, booking_state: BookingState) -> bool:
         await page.waitForSelector('.cerca_cliente.modale', { timeout: 10000 });
         logger.info("✅ Customer search modal opened automatically");
     except:
-        # Final fallback: Force-trigger the modal
-        logger.error("❌ Customer search modal did not open after time slot click");
-        raise Exception("Customer search modal failed to open");
+        # Final fallback: Force-trigger the modal via JavaScript
+        logger.warning("⚠️ Customer search modal did not open after time slot click, force-triggering...");
+        await page.evaluate("""
+            () => {
+                // Try to trigger the modal via the "Nuovo Cliente" button
+                const newClientBtn = document.querySelector('.button.aggiungi');
+                if (newClientBtn) newClientBtn.click();
+                
+                // Fallback: Directly call the modal function if available
+                if (typeof apriModaleCercaCliente === 'function') {
+                    apriModaleCercaCliente();
+                }
+            }
+        """);
+        
+        # Verify the modal is now open
+        try:
+            await page.waitForSelector('.cerca_cliente.modale', { timeout: 5000 });
+            logger.info("✅ Customer search modal opened after force-trigger");
+        except:
+            logger.error("❌ Customer search modal still did not open");
+            raise Exception("Customer search modal failed to open");
     
     # Search for and select the customer
     await page.fill('.cerca_cliente.modale input[name="cerca_cliente"]', 'Taiye Promise');

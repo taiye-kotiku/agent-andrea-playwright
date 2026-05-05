@@ -280,33 +280,32 @@ async def advance_to_time_selected(page, booking_state: BookingState) -> bool:
     clicked_operator_id = preferred_op_id
 
     async def click_slot(sel):
-        """Call the cell's jQuery click handler DIRECTLY (not via trigger)."""
+        """Set ALL agenda fields and call Apri_Cerca_Cliente directly."""
         h, m = hour, minute
         for attempt in range(3):
             result = await page.evaluate("""
                 ({hour, minute}) => {
                     try {
                         const cell = $('.cella[ora="' + hour + '"][minuto="' + minute + '"]').first();
-                        if (!cell.length) return {found: false, error: 'no cell'};
-                        const events = $._data(cell[0], 'events');
-                        if (!events || !events.click || !events.click.length) return {found: true, error: 'no click handler'};
-                        const handler = events.click[0].handler;
-                        handler.call(cell[0], $.Event('click'));
+                        if (!cell.length) return {error: 'no cell'};
+                        const opId = cell.attr('id_operatore');
+                        agenda.Form_ID_operatore = opId;
+                        agenda.Form_Orario_Inizio = hour + ':' + minute;
+                        agenda.Form_Nome_Operatore = 'Cliente';
+                        agenda.Apri_Cerca_Cliente(cell);
                         const modal = document.querySelector('.cerca_cliente.modale');
                         return {
-                            found: true,
-                            handlerCalled: true,
+                            opId: opId,
                             modalDisplay: modal ? getComputedStyle(modal).display : 'no-modal'
                         };
                     } catch(e) {
-                        return {found: true, error: e.message};
+                        return {error: e.message, stack: (e.stack || '').substring(0, 200)};
                     }
                 }
             """, {"hour": h, "minute": m})
 
             if result.get('modalDisplay') == 'flex':
                 return
-
             await asyncio.sleep(1)
         logger.warning(f"⚠️ Failed to open modal: {result}")
 

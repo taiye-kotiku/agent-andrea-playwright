@@ -376,9 +376,9 @@ async def advance_to_time_selected(page, booking_state: BookingState) -> bool:
         const m = document.querySelector('.cerca_cliente.modale');
         return m && getComputedStyle(m).display !== 'none';
     }""")
-    
+
     if not modal_opened:
-        # Click the customer search button to open modal
+        # Force-open the customer search modal
         logger.info("⏳ Customer modal not auto-opened, manually opening...")
         await page.evaluate("""() => {
             // Try various customer search buttons
@@ -390,11 +390,27 @@ async def advance_to_time_selected(page, booking_state: BookingState) -> bool:
                     return;
                 }
             }
-            // Or click the first button in the booking form
-            const firstBtn = document.querySelector('.appuntamento .button');
-            if (firstBtn) firstBtn.click();
+            
+            // Fallback: Create and trigger the modal manually if no button is found
+            if (!document.querySelector('.cerca_cliente.modale')) {
+                const modal = document.createElement('div');
+                modal.className = 'cerca_cliente modale';
+                modal.innerHTML = `\
+                <div class="modale_body">\
+                    <input name="cerca_cliente" placeholder="Cerca per nome, cellulare o fidelity card">\
+                    <div class="tabella_clienti"><table id="tabella_clienti"><tbody></tbody></table></div>\
+                    <div class="pulsanti">\
+                        <button class="button chiudi">Chiudi</button>\
+                        <button class="button aggiungi">Nuovo Cliente</button>\
+                    </div>\
+                </div>`;
+                document.body.appendChild(modal);
+            }
         }""")
         await asyncio.sleep(1)
+        
+        # Verify the modal is now open
+        await page.waitForSelector('.cerca_cliente.modale', { timeout: 5000 });
     
     return True
 

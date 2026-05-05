@@ -27,9 +27,9 @@ app = FastAPI(title="Agent Andrea - Wegest Booking Service")
 
 # Configuration
 API_SECRET = os.environ.get("API_SECRET", "changeme")
-DEBUG_SCREENSHOTS = os.environ.get("DEBUG_SCREENSHOTS", "false").lower() == "true"
 WEGEST_USER = os.environ.get("WEGEST_USERNAME", "")
 WEGEST_PASSWORD = os.environ.get("WEGEST_PASSWORD", "")
+OPENAI_API_KEY = os.environ.get("OPENAI_API_KEY", "")
 LOGIN_URL = "https://www.i-salon.eu/login/default.asp?login=&"
 
 # Catalog files

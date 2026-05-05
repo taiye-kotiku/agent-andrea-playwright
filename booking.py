@@ -612,8 +612,28 @@ async def advance_to_phone_confirmed(page, booking_state: BookingState) -> bool:
     else:
         logger.info("📱 No phone modal")
 
-    # Scan for any modals after phone confirmation (customer ID error, etc.)
-    await adaptive_modal_scan(page, "after-phone-confirm")
+    # Scan for and dismiss any modals after customer selection (customer ID error, etc.)
+    await adaptive_modal_scan(page, "after-customer-select");
+    
+    # Explicitly check for Customer ID Error modal
+    customer_id_error_modal = await page.evaluate("""
+        () => {
+            const modal = document.querySelector('#modale_alert, #modale_dialog');
+            if (!modal) return false;
+            const style = window.getComputedStyle(modal);
+            const text = modal.textContent || '';
+            return (style.display !== 'none' && style.visibility !== 'hidden') &&
+                   (text.includes('Errore ID cliente') || text.includes('Attenzione'));
+        }
+    """);
+    
+    if customer_id_error_modal:
+        logger.info("  ⚠️ Customer ID Error modal detected, dismissing it");
+        try:
+            await page.click('#modale_alert .button.conferma, #modale_dialog .button.conferma', force=True);
+            await asyncio.sleep(0.5);
+        except:
+            await page.evaluate('document.querySelector("#modale_alert, #modale_dialog")?.remove()');
 
     await asyncio.sleep(1)
     return True

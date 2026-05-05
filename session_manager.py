@@ -278,6 +278,26 @@ async def dismiss_system_modals(page, label=""):
                 await page.evaluate('document.querySelector(".modale.card.inserisci_cellulare")?.remove()');  # Force remove
             continue  # Re-check for other modals
         
+        # Handle Customer ID Error modal explicitly
+        customer_id_error_modal = await page.evaluate("""
+            () => {
+                const modal = document.querySelector('#modale_alert, #modale_dialog');
+                if (!modal) return false;
+                const style = window.getComputedStyle(modal);
+                const text = modal.textContent || '';
+                return (style.display !== 'none' && style.visibility !== 'hidden') &&
+                       (text.includes('Errore ID cliente') || text.includes('Attenzione'));
+            }
+        """)
+        
+        if customer_id_error_modal:
+            try:
+                await page.click('#modale_alert .button.conferma, #modale_dialog .button.conferma', force=True);  # Click "Conferma" button
+                await page.waitForTimeout(500);  # Wait for animation
+            except:
+                await page.evaluate('document.querySelector("#modale_alert, #modale_dialog")?.remove()');  # Force remove
+            continue  # Re-check for other modals
+        
         modal_visible = await page.evaluate("""
             () => {
                 const modal = document.getElementById('modale_dialog');

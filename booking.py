@@ -280,30 +280,41 @@ async def advance_to_time_selected(page, booking_state: BookingState) -> bool:
     clicked_operator_id = preferred_op_id
 
     async def click_slot(sel):
-        """Open modal by calling agenda.Apri_Cerca_Cliente directly."""
+        """Open modal - debug mode to check environment."""
         h, m = hour, minute
         for attempt in range(3):
             result = await page.evaluate("""
-                ({hour, minute, opId}) => {
-                    try {
-                        const cell = jQuery('.cella[ora="' + hour + '"][minuto="' + minute + '"]').first();
-                        if (!cell.length) return {error: 'cell not found'};
-                        agenda.Form_ID_operatore = opId;
-                        agenda.Form_Orario_Inizio = hour + ':' + minute;
-                        agenda.Form_Nome_Operatore = 'Operatore';
-                        agenda.Apri_Cerca_Cliente(cell);
-                        const modal = document.querySelector('.cerca_cliente.modale');
-                        return {modalDisplay: modal ? getComputedStyle(modal).display : 'no-modal', opId: opId};
-                    } catch(e) {
-                        return {error: e.message, stack: (e.stack || '').substring(0, 300)};
+                () => {
+                    const info = {
+                        hasJQuery: typeof jQuery !== 'undefined',
+                        hasDollar: typeof $ !== 'undefined',
+                        hasAgenda: typeof agenda !== 'undefined',
+                        hasApriCerca: agenda && typeof agenda.Apri_Cerca_Cliente === 'function',
+                        interazioni: agenda ? agenda.Interazioni_Abilitate : null
+                    };
+                    const cell = $('.cella[ora="10"][minuto="0"]').first();
+                    info.cellFound = cell.length > 0;
+                    if (cell.length) {
+                        const events = $._data(cell[0], 'events');
+                        info.hasClickHandler = !!(events && events.click && events.click.length);
+                        if (info.hasClickHandler) {
+                            agenda.Form_ID_operatore = cell.attr('id_operatore');
+                            agenda.Form_Orario_Inizio = '10:00';
+                            agenda.Form_Nome_Operatore = 'Test';
+                            agenda.Apri_Cerca_Cliente(cell);
+                            const modal = document.querySelector('.cerca_cliente.modale');
+                            info.modalDisplay = modal ? getComputedStyle(modal).display : 'no-modal';
+                        }
                     }
+                    return info;
                 }
-            """, {"hour": h, "minute": m, "opId": clicked_operator_id or "29093"})
+            """)
 
             if result.get('modalDisplay') == 'flex':
                 return
-            await asyncio.sleep(1.5)
-        logger.warning(f"⚠️ Could not open modal: {result}")
+            logger.warning(f"⚠️ Attempt {attempt+1} info: {result}")
+            await asyncio.sleep(2)
+        logger.warning(f"⚠️ Failed after 3 attempts. Last state: {result}")
 
     if preferred_op_id:
         logger.info(f"Trying specific operator slot for id_operatore={preferred_op_id}")

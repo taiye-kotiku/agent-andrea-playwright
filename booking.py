@@ -372,16 +372,16 @@ async def advance_to_time_selected(page, booking_state: BookingState) -> bool:
     # After time click, check if customer modal opened - if not, we need to open customer search
     await adaptive_modal_scan(page, "post-time-click")
     
-    modal_opened = await page.evaluate("""() => {
-        const m = document.querySelector('.cerca_cliente.modale');
-        return m && getComputedStyle(m).display !== 'none';
-    }""")
-
-    if not modal_opened:
-        # Force-open the customer search modal
-        logger.info("⏳ Customer modal not auto-opened, manually opening...")
+    # Assume the modal will appear after time selection
+    try:
+        await page.waitForSelector('.cerca_cliente.modale', { timeout: 5000 });
+        logger.info("✅ Customer search modal opened automatically");
+    except:
+        # Log a warning if the modal doesn't appear, but continue the flow
+        logger.warning("⚠️ Customer search modal did not open automatically after time selection. Continuing flow...")
+        
+        # Try to trigger the modal via existing buttons
         await page.evaluate("""() => {
-            // Try various customer search buttons
             const btns = document.querySelectorAll('.button, a.button, [onclick*="cliente"]');
             for (const btn of btns) {
                 const txt = btn.textContent.toLowerCase();
@@ -390,27 +390,8 @@ async def advance_to_time_selected(page, booking_state: BookingState) -> bool:
                     return;
                 }
             }
-            
-            // Fallback: Create and trigger the modal manually if no button is found
-            if (!document.querySelector('.cerca_cliente.modale')) {
-                const modal = document.createElement('div');
-                modal.className = 'cerca_cliente modale';
-                modal.innerHTML = `\
-                <div class="modale_body">\
-                    <input name="cerca_cliente" placeholder="Cerca per nome, cellulare o fidelity card">\
-                    <div class="tabella_clienti"><table id="tabella_clienti"><tbody></tbody></table></div>\
-                    <div class="pulsanti">\
-                        <button class="button chiudi">Chiudi</button>\
-                        <button class="button aggiungi">Nuovo Cliente</button>\
-                    </div>\
-                </div>`;
-                document.body.appendChild(modal);
-            }
-        }""")
-        await asyncio.sleep(1)
-        
-        # Verify the modal is now open
-        await page.waitForSelector('.cerca_cliente.modale', { timeout: 5000 });
+        }""");
+        await asyncio.sleep(1);
     
     return True
 

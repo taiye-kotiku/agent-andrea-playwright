@@ -264,11 +264,14 @@ async def advance_to_time_selected(page, booking_state: BookingState) -> bool:
         base += ":not(.assente):not(.occupata)"
         return base
 
-    # Hide any stale form modal left from pool warmup before clicking
+    # Close any stale form modal left from pool warmup by clicking the close button
     await page.evaluate("""
         () => {
             const f = document.querySelector('.form_appuntamento');
-            if (f && getComputedStyle(f).display !== 'none') f.style.display = 'none';
+            if (f && getComputedStyle(f).display !== 'none') {
+                const closeBtn = f.querySelector('.button.chiudi');
+                if (closeBtn) closeBtn.click();
+            }
         }
     """);
     await asyncio.sleep(1)

@@ -283,7 +283,7 @@ async def advance_to_time_selected(page, booking_state: BookingState) -> bool:
         nonlocal time_clicked, actual_time, clicked_operator_id
         for attempt in range(3):
             try:
-                await page.click(sel, timeout=5000)
+                await page.click(sel, timeout=5000, force=True, no_wait_after=True)
             except Exception as e:
                 logger.warning(f"page.click attempt {attempt+1} failed: {e}")
                 await asyncio.sleep(1)

@@ -282,18 +282,27 @@ async def advance_to_time_selected(page, booking_state: BookingState) -> bool:
     async def click_slot(sel):
         """Open customer search modal by calling agenda.Apri_Cerca_Cliente directly."""
         logger.info(f"📞 Opening customer search for {hour}:{minute}")
-        await page.evaluate(f"""
+        result = await page.evaluate(f"""
             () => {{
-                if (typeof agenda !== 'undefined' && agenda.Apri_Cerca_Cliente) {{
+                try {{
+                    if (typeof agenda === 'undefined') return {{ error: 'no agenda global' }};
+                    if (!agenda.Apri_Cerca_Cliente) return {{ error: 'no Apri_Cerca_Cliente method' }};
                     var cell = $('.cella[ora="{hour}"][minuto="{minute}"]').first();
-                    if (cell.length) {{
-                        agenda.Form_ID_operatore = cell.attr('id_operatore');
-                        agenda.Form_Orario_Inizio = '{hour}:{minute}';
-                        agenda.Apri_Cerca_Cliente(cell);
-                    }}
+                    if (!cell.length) return {{ error: 'cell not found' }};
+                    var opId = cell.attr('id_operatore');
+                    agenda.Form_ID_operatore = opId;
+                    agenda.Form_Orario_Inizio = '{hour}:{minute}';
+                    agenda.Form_Nome_Operatore = 'Operatore';
+                    agenda.Apri_Cerca_Cliente(cell);
+                    var modalVisible = document.querySelector('.cerca_cliente.modale') &&
+                        getComputedStyle(document.querySelector('.cerca_cliente.modale')).display !== 'none';
+                    return {{ success: true, found: true, opId: opId, modalVisible: modalVisible }};
+                }} catch(e) {{
+                    return {{ error: e.message, stack: e.stack.substring(0, 200) }};
                 }}
             }}
         """)
+        logger.info(f"📞 Direct call result: {result}")
         await asyncio.sleep(2)
 
     if preferred_op_id:

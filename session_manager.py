@@ -242,6 +242,24 @@ async def dismiss_system_modals(page, label=""):
             }
         """)
         
+        # Handle customer_search modal explicitly
+        customer_search_modal = await page.evaluate("""
+            () => {
+                const modal = document.querySelector('.cerca_cliente.modale');
+                if (!modal) return false;
+                const style = window.getComputedStyle(modal);
+                return style.display !== 'none' && style.visibility !== 'hidden';
+            }
+        """)
+        
+        if customer_search_modal:
+            try:
+                await page.click('text=Chiudi', force=True);  # Click "Chiudi" button
+                await page.waitForTimeout(500);  # Wait for animation
+            except:
+                await page.evaluate('document.querySelector(".cerca_cliente.modale")?.remove()');  # Force remove
+            continue  # Re-check for other modals
+        
         modal_visible = await page.evaluate("""
             () => {
                 const modal = document.getElementById('modale_dialog');

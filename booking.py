@@ -280,31 +280,35 @@ async def advance_to_time_selected(page, booking_state: BookingState) -> bool:
     clicked_operator_id = preferred_op_id
 
     async def click_slot(sel):
-        """Click the cell using Playwright's trusted page.click, then verify."""
+        """Open modal by calling agenda.Apri_Cerca_Cliente with a proper jQuery event."""
         h, m = hour, minute
-        try:
-            await page.screenshot(path="/tmp/pre_click.png")
-        except:
-            pass
         for attempt in range(3):
-            sel_exact = exact_selector(op_id=clicked_operator_id, h=h, m=m)
-            try:
-                loc = page.locator(sel_exact).first
-                await loc.scroll_into_view_if_needed()
-                await asyncio.sleep(0.5)
-                await loc.click(force=True, timeout=5000)
-            except:
-                sel_exact = exact_selector(h=h, m=m)
-                loc = page.locator(sel_exact).first
-                await loc.scroll_into_view_if_needed()
-                await asyncio.sleep(0.5)
-                await loc.click(force=True, timeout=5000)
+            result = await page.evaluate("""
+                ({hour, minute, opId}) => {
+                    try {
+                        const cell = $('.cella[ora="' + hour + '"][minuto="' + minute + '"]').first();
+                        if (!cell.length) return {error: 'cell not found'};
+                        const ev = $.Event('click');
+                        ev.target = cell[0];
+                        agenda.Form_ID_operatore = opId;
+                        agenda.Form_Orario_Inizio = hour + ':' + minute;
+                        agenda.Form_Nome_Operatore = 'Operatore';
+                        agenda.Apri_Cerca_Cliente(cell);
+                        const modal = document.querySelector('.cerca_cliente.modale');
+                        return {
+                            modalDisplay: modal ? getComputedStyle(modal).display : 'no-modal',
+                            opId: opId
+                        };
+                    } catch(e) {
+                        return {error: e.message};
+                    }
+                }
+            """, {"hour": h, "minute": m, "opId": clicked_operator_id or "29093"})
 
-            await asyncio.sleep(1.5)
-            modal_open = await page.evaluate("() => { var m = document.querySelector('.cerca_cliente.modale'); return m ? getComputedStyle(m).display : 'none'; }")
-            if modal_open == 'flex':
+            if result.get('modalDisplay') == 'flex':
                 return
-        logger.warning(f"⚠️ Could not open modal after {attempt+1} attempts")
+            await asyncio.sleep(1.5)
+        logger.warning(f"⚠️ Could not open modal: {result}")
 
     if preferred_op_id:
         logger.info(f"Trying specific operator slot for id_operatore={preferred_op_id}")

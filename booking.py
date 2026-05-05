@@ -280,11 +280,10 @@ async def advance_to_time_selected(page, booking_state: BookingState) -> bool:
     clicked_operator_id = preferred_op_id
 
     async def click_slot(sel):
-        """Scroll to element, then trigger jQuery click handler directly."""
-        escaped = sel.replace("'", "\\'")
+        """Trigger jQuery click on the time slot cell (confirmed working in manual test)."""
         await page.evaluate(f"""
             () => {{
-                var cell = $('{escaped}').first();
+                var cell = $('.cella[ora="{hour}"][minuto="{minute}"]').first();
                 if (cell.length) {{
                     cell.trigger('click');
                 }}

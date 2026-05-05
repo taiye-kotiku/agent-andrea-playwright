@@ -280,35 +280,24 @@ async def advance_to_time_selected(page, booking_state: BookingState) -> bool:
     clicked_operator_id = preferred_op_id
 
     async def click_slot(sel):
-        """Open appointment form using jQuery trigger (WeGest uses jQuery)."""
-        try:
-            loc = page.locator(sel).first
-            await loc.scroll_into_view_if_needed()
-            await asyncio.sleep(0.5)
+        """Scroll to element, then trigger its mousedown event directly (WeGest listens to mousedown)."""
+        loc = page.locator(sel).first
+        await loc.scroll_into_view_if_needed()
+        await asyncio.sleep(0.5)
+        box = await loc.bounding_box()
+        if box:
+            cx = box['x'] + box['width'] / 2
+            cy = box['y'] + box['height'] / 2
+            await page.mouse.move(cx, cy)
+            await asyncio.sleep(0.3)
+            await page.mouse.down()
+            await asyncio.sleep(0.1)
+            await page.mouse.up()
+            logger.info(f"✅ Mouse down/up at ({cx:.0f}, {cy:.0f})")
+        else:
             await loc.click(force=True, timeout=5000)
-            logger.info("✅ Playwright click executed")
-        except Exception as e:
-            logger.warning(f"⚠️ Playwright click failed: {e}")
 
-        await asyncio.sleep(1)
-
-        modal_visible = await page.evaluate("() => { const m = document.querySelector('.cerca_cliente.modale'); return m && getComputedStyle(m).display !== 'none'; }")
-        if not modal_visible:
-            logger.info("📞 Triggering click via jQuery...")
-            await page.evaluate(f"""
-                () => {{
-                    const slot = document.querySelector('{sel.replace(chr(39), chr(92)+chr(39))}');
-                    if (slot) {{
-                        if (window.$) {{
-                            $(slot).trigger('click');
-                            $(slot).trigger('mousedown');
-                            $(slot).trigger('mouseup');
-                        }}
-                        slot.dispatchEvent(new MouseEvent('click', {{bubbles:true,cancelable:true,view:window}}));
-                    }}
-                }}
-            """)
-            await asyncio.sleep(2)
+        await asyncio.sleep(2)
 
     if preferred_op_id:
         logger.info(f"Trying specific operator slot for id_operatore={preferred_op_id}")

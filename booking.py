@@ -264,17 +264,6 @@ async def advance_to_time_selected(page, booking_state: BookingState) -> bool:
         base += ":not(.assente):not(.occupata)"
         return base
 
-    # Close any stale modals that might be open from pool warmup
-    await page.evaluate("""
-        () => {
-            const stales = document.querySelectorAll('.form_appuntamento, .modale_overlay, .overlay_modale');
-            stales.forEach(el => {
-                if (getComputedStyle(el).display !== 'none') el.style.display = 'none';
-            });
-        }
-    """);
-    await asyncio.sleep(1)
-
     clicked = False
     actual_time = f"{hour}:{minute}"
     clicked_operator_id = preferred_op_id

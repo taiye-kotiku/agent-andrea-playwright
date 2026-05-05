@@ -375,9 +375,38 @@ async def advance_to_time_selected(page, booking_state: BookingState) -> bool:
     # Click the time slot to open the customer search modal
     logger.info("🕒 Clicking time slot to open customer search modal...");
     
-    # Use the first available operator (29093) to target the time slot
-    operator_id = "29093";
-    time_slot_selector = f'div.cella.inizio_ora[id_operatore="{operator_id}"]';
+    # Define the date and time for the booking
+    giorno = "5";  # Day
+    mese = "5";    # Month
+    anno = "2026"; # Year
+    ora = "14";    # Hour
+    minuto = "0";  # Minute
+    operator_id = "29093";  # First available operator
+    
+    # Use a more specific selector for the time slot
+    time_slot_selector = f'div.cella.inizio_ora[ora="{ora}"][minuto="{minuto}"][giorno="{giorno}"][mese="{mese}"][anno="{anno}"][id_operatore="{operator_id}"]';
+    
+    # Debug: Log whether the time slot exists
+    time_slot_exists = await page.evaluate(f"""
+        (selector) => {{
+            const timeSlot = document.querySelector(selector);
+            return !!timeSlot;
+        }}
+    """, time_slot_selector);
+    
+    if not time_slot_exists:
+        logger.error(f"❌ Time slot not found: {time_slot_selector}");
+        raise Exception("Time slot not found");
+    
+    # Scroll the time slot into view
+    await page.evaluate(f"""
+        (selector) => {
+            const timeSlot = document.querySelector(selector);
+            if (timeSlot) {
+                timeSlot.scrollIntoView({ behavior: 'auto', block: 'center', inline: 'center' });
+            }
+        }
+    """, time_slot_selector);
     
     # Click the time slot with Playwright
     try:
@@ -388,25 +417,25 @@ async def advance_to_time_selected(page, booking_state: BookingState) -> bool:
         
         # Fallback: Simulate a click with JavaScript
         await page.evaluate(f"""
-            (selector) => {{
+            (selector) => {
                 const timeSlot = document.querySelector(selector);
-                if (timeSlot) {{
+                if (timeSlot) {
                     const rect = timeSlot.getBoundingClientRect();
                     const clientX = rect.left + rect.width / 2;
                     const clientY = rect.top + rect.height / 2;
                     
-                    ['mousedown', 'mouseup', 'click', 'pointerdown', 'pointerup'].forEach(event => {{
-                        const evt = new MouseEvent(event, {{
+                    ['mousedown', 'mouseup', 'click', 'pointerdown', 'pointerup'].forEach(event => {
+                        const evt = new MouseEvent(event, {
                             view: window,
                             bubbles: true,
                             cancelable: true,
                             clientX: clientX,
                             clientY: clientY
-                        }});
+                        });
                         timeSlot.dispatchEvent(evt);
-                    }});
-                }}
-            }}
+                    });
+                }
+            }
         """, time_slot_selector);
     
     # Wait for the customer search modal to appear

@@ -264,6 +264,15 @@ async def advance_to_time_selected(page, booking_state: BookingState) -> bool:
         base += ":not(.assente):not(.occupata)"
         return base
 
+    # Hide any stale form modal left from pool warmup before clicking
+    await page.evaluate("""
+        () => {
+            const f = document.querySelector('.form_appuntamento');
+            if (f && getComputedStyle(f).display !== 'none') f.style.display = 'none';
+        }
+    """);
+    await asyncio.sleep(1)
+
     clicked = False
     actual_time = f"{hour}:{minute}"
     clicked_operator_id = preferred_op_id

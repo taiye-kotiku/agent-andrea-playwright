@@ -194,9 +194,9 @@ async def advance_to_date_selected(page, booking_state: BookingState) -> bool:
         logger.warning("Grid didn't load after date click — retrying")
         await page.evaluate("""
             () => {
-                document.querySelectorAll('.modale_overlay, .overlay_modale, .overlay, #modale_sfondo, .agenda_modale_sfondo').forEach(el => {
-                    if (getComputedStyle(el).display !== 'none') el.style.display = 'none';
-                });
+document.querySelectorAll('.modale_overlay, .overlay_modale, .overlay, #modale_sfondo, .agenda_modale_sfondo').forEach(el => {
+    el.remove(); // Forcefully remove the overlay to prevent pointer events interference
+});
             }
         """)
         await page.click(date_selector, timeout=5000)

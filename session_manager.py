@@ -232,8 +232,16 @@ async def ensure_wegest_logged_in(conversation_id: str):
 
 
 async def dismiss_system_modals(page, label=""):
-    logger.info(f"🔍 Modal sweep: {label}")
     for attempt in range(5):
+        # Remove all blocking overlays first
+        await page.evaluate("""
+            () => {
+                document.querySelectorAll('.modale_overlay, .overlay_modale, .overlay, #modale_sfondo, .agenda_modale_sfondo').forEach(el => {
+                    el.remove();
+                });
+            }
+        """)
+        
         modal_visible = await page.evaluate("""
             () => {
                 const modal = document.getElementById('modale_dialog');
@@ -269,9 +277,9 @@ async def dismiss_system_modals(page, label=""):
         await page.wait_for_timeout(1000)
     await page.evaluate("""
         () => {
-            document.querySelectorAll('.modale_overlay, .overlay_modale, .overlay, #modale_sfondo, .agenda_modale_sfondo').forEach(el => {
-                if (getComputedStyle(el).display !== 'none') el.style.display = 'none';
-            });
+document.querySelectorAll('.modale_overlay, .overlay_modale, .overlay, #modale_sfondo, .agenda_modale_sfondo').forEach(el => {
+    el.remove(); // Forcefully remove the overlay to prevent pointer events interference
+});
         }
     """)
 

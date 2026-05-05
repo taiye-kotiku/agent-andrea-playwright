@@ -280,30 +280,32 @@ async def advance_to_time_selected(page, booking_state: BookingState) -> bool:
     clicked_operator_id = preferred_op_id
 
     async def click_slot(sel):
-        """Open customer search modal by calling agenda.Apri_Cerca_Cliente directly."""
-        logger.info(f"📞 Opening customer search for {hour}:{minute}")
-        result = await page.evaluate(f"""
-            () => {{
-                try {{
-                    if (typeof agenda === 'undefined') return {{ error: 'no agenda global' }};
-                    if (!agenda.Apri_Cerca_Cliente) return {{ error: 'no Apri_Cerca_Cliente method' }};
+        """Trigger jQuery click on time slot cell (confirmed working in console). Retry with delays."""
+        for attempt in range(3):
+            logger.info(f"🔄 Attempt {attempt+1} to open customer search for {hour}:{minute}")
+            modal_before = await page.evaluate("() => { var m = document.querySelector('.cerca_cliente.modale'); return m ? getComputedStyle(m).display : 'none'; }")
+
+            await page.evaluate(f"""
+                () => {{
                     var cell = $('.cella[ora="{hour}"][minuto="{minute}"]').first();
-                    if (!cell.length) return {{ error: 'cell not found' }};
-                    var opId = cell.attr('id_operatore');
-                    agenda.Form_ID_operatore = opId;
-                    agenda.Form_Orario_Inizio = '{hour}:{minute}';
-                    agenda.Form_Nome_Operatore = 'Operatore';
-                    agenda.Apri_Cerca_Cliente(cell);
-                    var modalVisible = document.querySelector('.cerca_cliente.modale') &&
-                        getComputedStyle(document.querySelector('.cerca_cliente.modale')).display !== 'none';
-                    return {{ success: true, found: true, opId: opId, modalVisible: modalVisible }};
-                }} catch(e) {{
-                    return {{ error: e.message, stack: e.stack.substring(0, 200) }};
+                    if (cell.length) {{
+                        cell.trigger('click');
+                    }}
                 }}
-            }}
-        """)
-        logger.info(f"📞 Direct call result: {result}")
-        await asyncio.sleep(2)
+            """)
+
+            await asyncio.sleep(1.5)
+
+            modal_after = await page.evaluate("() => { var m = document.querySelector('.cerca_cliente.modale'); return m ? getComputedStyle(m).display : 'none'; }")
+            logger.info(f"  Modal state: before={modal_before} after={modal_after}")
+
+            if modal_after == 'flex':
+                logger.info("✅ Customer search modal opened!")
+                return
+            else:
+                logger.info(f"  Retrying...")
+                await asyncio.sleep(1)
+        logger.warning("⚠️ Could not open customer search modal after 3 attempts")
 
     if preferred_op_id:
         logger.info(f"Trying specific operator slot for id_operatore={preferred_op_id}")
@@ -405,7 +407,7 @@ async def advance_to_time_selected(page, booking_state: BookingState) -> bool:
     booking_state.booked_time = actual_time
     booking_state.booked_operator = clicked_operator_id
     logger.info(f"✅ Time selected: {actual_time} | operator={clicked_operator_id}")
-    await asyncio.sleep(3)
+    await asyncio.sleep(5)
     
     # Wait for the customer search modal to appear (time slot click opens this directly)
     logger.info("⏳ Waiting for customer search modal to appear...")

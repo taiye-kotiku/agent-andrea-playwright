@@ -379,7 +379,7 @@ async def advance_to_time_selected(page, booking_state: BookingState) -> bool:
     time_slot = page.locator('.cella.inizio_ora[ora="14"][minuto="0"]');
     
     # Wait for the time slot to be visible and enabled
-    await time_slot.waitFor({ state: 'visible', timeout: 10000 });
+    await time_slot.wait_for(state='visible', timeout=10000);
     
     # Scroll the time slot into view
     await time_slot.evaluate("""
@@ -390,7 +390,7 @@ async def advance_to_time_selected(page, booking_state: BookingState) -> bool:
     
     # Click the time slot with Playwright
     try:
-        await time_slot.click({ timeout: 10000 });
+        await time_slot.click(timeout=10000);
         logger.info("✅ Time slot clicked successfully");
     except:
         # Fallback: Simulate a click with JavaScript
@@ -413,6 +413,20 @@ async def advance_to_time_selected(page, booking_state: BookingState) -> bool:
                         });
                         timeSlot.dispatchEvent(evt);
                     });
+                }
+            }
+        """);
+        
+        # Fallback: Trigger the modal via JavaScript if the click fails
+        await page.evaluate("""
+            () => {
+                // Try to trigger the modal via the "Nuovo Cliente" button
+                const newClientBtn = document.querySelector('.button.aggiungi');
+                if (newClientBtn) newClientBtn.click();
+                
+                // Fallback: Directly call the modal function if available
+                if (typeof apriModaleCercaCliente === 'function') {
+                    apriModaleCercaCliente();
                 }
             }
         """);

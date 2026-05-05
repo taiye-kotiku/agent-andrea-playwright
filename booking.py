@@ -375,52 +375,16 @@ async def advance_to_time_selected(page, booking_state: BookingState) -> bool:
     # Click the time slot to open the customer search modal
     logger.info("🕒 Clicking time slot to open customer search modal...");
     
-    # Define the date and time for the booking
-    giorno = "5";  # Day
-    mese = "5";    # Month
-    anno = "2026"; # Year
-    ora = "14";    # Hour
-    minuto = "0";  # Minute
-    operator_id = "29093";  # First available operator
-    
-    # Use a more specific selector for the time slot
-    time_slot_selector = f'.cella.inizio_ora[ora="{ora}"][minuto="{minuto}"][giorno="{giorno}"][mese="{mese}"][anno="{anno}"][id_operatore="{operator_id}"]';
-    
-    # Debug: Log the selector and check if the element exists
-    time_slot_count = await page.evaluate(f"""
-        (selector) => {{
-            const slots = document.querySelectorAll(selector);
-            console.log('Time slots found:', slots.length);
-            return slots.length;
-        }}
-    """, time_slot_selector);
-    
-    logger.info(f"🔍 Found {time_slot_count} time slots matching selector: {time_slot_selector}");
-    
-    # Use Playwright's locator to find the time slot
-    time_slot = page.locator(time_slot_selector);
-    
-    # Wait for the time slot to be visible and enabled
-    try:
-        await time_slot.wait_for(state='visible', timeout=10000);
-        logger.info("✅ Time slot is visible and enabled");
-    except:
-        logger.error("❌ Time slot is not visible or enabled");
-        raise Exception("Time slot not found or not interactable");
-    
-    # Scroll the time slot into view
-    await time_slot.evaluate("""
-        (element) => {
-            element.scrollIntoView({ behavior: 'auto', block: 'center', inline: 'center' });
-        }
-    """);
+    # Use the first available operator (29093) to target the time slot
+    operator_id = "29093";
+    time_slot_selector = f'div.cella.inizio_ora[id_operatore="{operator_id}"]';
     
     # Click the time slot with Playwright
     try:
-        await time_slot.click(timeout=10000);
+        await page.click(time_slot_selector, timeout=10000);
         logger.info("✅ Time slot clicked successfully");
     except Exception as e:
-        logger.warning(f"⚠️ Playwright click failed: {e}. Simulating click with JavaScript");
+        logger.warning(f"⚠️ Playwright click failed: {e}. Falling back to JavaScript");
         
         # Fallback: Simulate a click with JavaScript
         await page.evaluate(f"""
@@ -441,29 +405,9 @@ async def advance_to_time_selected(page, booking_state: BookingState) -> bool:
                         }});
                         timeSlot.dispatchEvent(evt);
                     }});
-                }} else {{
-                    console.error('Time slot not found:', selector);
                 }}
             }}
         """, time_slot_selector);
-        
-        # Fallback: Trigger the modal via JavaScript if the click fails
-        await page.evaluate("""
-            () => {
-                // Try to trigger the modal via the "Nuovo Cliente" button
-                const newClientBtn = document.querySelector('.button.aggiungi');
-                if (newClientBtn) {
-                    console.log('Triggering modal via Nuovo Cliente button');
-                    newClientBtn.click();
-                }
-                
-                // Fallback: Directly call the modal function if available
-                if (typeof apriModaleCercaCliente === 'function') {
-                    console.log('Triggering modal via apriModaleCercaCliente()');
-                    apriModaleCercaCliente();
-                }
-            }
-        """);
     
     # Wait for the customer search modal to appear
     try:

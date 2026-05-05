@@ -15,7 +15,6 @@ from config import (
     WEGEST_PASSWORD,
     LOGIN_URL,
     logger,
-    DEBUG_SCREENSHOTS,
     screenshots
 )
 from playwright.async_api import async_playwright

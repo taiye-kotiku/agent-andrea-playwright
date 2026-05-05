@@ -31,6 +31,7 @@ WEGEST_USER = os.environ.get("WEGEST_USERNAME", "")
 WEGEST_PASSWORD = os.environ.get("WEGEST_PASSWORD", "")
 OPENAI_API_KEY = os.environ.get("OPENAI_API_KEY", "")
 LOGIN_URL = "https://www.i-salon.eu/login/default.asp?login=&"
+DEBUG_SCREENSHOTS = os.environ.get("DEBUG_SCREENSHOTS", "false").lower() == "true"
 
 # Catalog files
 OPERATOR_CATALOG_FILE = Path("operator_catalog.json")

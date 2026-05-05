@@ -281,14 +281,27 @@ async def advance_to_time_selected(page, booking_state: BookingState) -> bool:
 
     async def click_slot(sel):
         """Trigger jQuery click on the time slot cell (confirmed working in manual test)."""
-        await page.evaluate(f"""
+        result = await page.evaluate(f"""
             () => {{
                 var cell = $('.cella[ora="{hour}"][minuto="{minute}"]').first();
-                if (cell.length) {{
-                    cell.trigger('click');
-                }}
+                return {{
+                    found: cell.length > 0,
+                    hasJQuery: typeof $ !== 'undefined',
+                    selector: '.cella[ora="{hour}"][minuto="{minute}"]',
+                    hour: '{hour}',
+                    minute: '{minute}',
+                    cellHtml: cell.length ? cell[0].outerHTML.substring(0, 100) : ''
+                }};
             }}
         """)
+        logger.info(f"🔍 jQuery click result: {result}")
+        if result.get("found"):
+            await page.evaluate(f"""
+                () => {{
+                    var cell = $('.cella[ora="{hour}"][minuto="{minute}"]').first();
+                    cell.trigger('click');
+                }}
+            """)
         await asyncio.sleep(2)
 
     if preferred_op_id:

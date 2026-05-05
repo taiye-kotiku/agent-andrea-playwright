@@ -375,23 +375,16 @@ async def advance_to_time_selected(page, booking_state: BookingState) -> bool:
     # Click the time slot to open the customer search modal
     logger.info("🕒 Clicking time slot to open customer search modal...");
     
-    # Get the time slot element and scroll it into view
-    time_slot = await page.waitForSelector('.cella.inizio_ora[ora="14"][minuto="0"]', { timeout: 10000 });
+    # Use Playwright's locator to find the time slot
+    time_slot = page.locator('.cella.inizio_ora[ora="14"][minuto="0"]');
+    
+    # Wait for the time slot to be visible and enabled
+    await time_slot.waitFor({ state: 'visible', timeout: 10000 });
+    
+    # Scroll the time slot into view
     await time_slot.evaluate("""
         (element) => {
             element.scrollIntoView({ behavior: 'auto', block: 'center', inline: 'center' });
-        }
-    """);
-    
-    # Ensure the time slot is visible and enabled
-    await page.evaluate("""
-        () => {
-            const timeSlot = document.querySelector('.cella.inizio_ora[ora="14"][minuto="0"]');
-            if (timeSlot) {
-                timeSlot.style.display = 'block';
-                timeSlot.style.visibility = 'visible';
-                timeSlot.style.pointerEvents = 'auto';
-            }
         }
     """);
     

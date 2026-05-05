@@ -588,27 +588,27 @@ async def advance_to_customer_selected(page, booking_state: BookingState) -> boo
 # ─── Phase: Handle Phone Modal ────────────────────────────────────────
 
 async def advance_to_phone_confirmed(page, booking_state: BookingState) -> bool:
-    """Handle the phone input modal if it appears."""
-    phone_safe = js_escape(booking_state.customer_phone or "")
-
-    result = await page.evaluate(f"""
-        () => {{
+    """Dismiss the phone input modal if it appears."""
+    result = await page.evaluate("""
+        () => {
             const m = document.querySelector('.modale.card.inserisci_cellulare');
-            if (!m || getComputedStyle(m).display === 'none') return {{ visible: false }};
-            const inp = m.querySelector('input[name="cellulare"]');
-            if (inp && '{phone_safe}') {{
-                inp.value = '{phone_safe}';
-                inp.dispatchEvent(new Event('input', {{bubbles:true}}));
-                inp.dispatchEvent(new Event('change', {{bubbles:true}}));
-            }}
+            if (!m || getComputedStyle(m).display === 'none') return { visible: false };
+            
+            // Click the "Conferma" button to dismiss the modal
             const btn = m.querySelector('.button.rimira.primary.conferma') || m.querySelector('.button.conferma');
-            if (btn) {{ btn.click(); return {{ visible: true, filled: true, confirmed: true }}; }}
-            return {{ visible: true, filled: !!inp, confirmed: false }};
-        }}
-    """)
+            if (btn) {
+                btn.click();
+                return { visible: true, dismissed: true };
+            }
+            
+            // Fallback: Forcefully remove the modal if the button isn't found
+            m.remove();
+            return { visible: true, dismissed: true };
+        }
+    """")
 
     if result.get("visible"):
-        logger.info(f"📱 Phone modal handled: {result}")
+        logger.info(f"📱 Phone modal dismissed: {result}")
     else:
         logger.info("📱 No phone modal")
 

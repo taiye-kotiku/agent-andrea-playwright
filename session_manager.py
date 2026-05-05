@@ -260,6 +260,24 @@ async def dismiss_system_modals(page, label=""):
                 await page.evaluate('document.querySelector(".cerca_cliente.modale")?.remove()');  # Force remove
             continue  # Re-check for other modals
         
+        # Handle phone_input modal explicitly
+        phone_input_modal = await page.evaluate("""
+            () => {
+                const modal = document.querySelector('.modale.card.inserisci_cellulare');
+                if (!modal) return false;
+                const style = window.getComputedStyle(modal);
+                return style.display !== 'none' && style.visibility !== 'hidden';
+            }
+        """)
+        
+        if phone_input_modal:
+            try:
+                await page.click('.modale.card.inserisci_cellulare .button.conferma', force=True);  # Click "Conferma" button
+                await page.waitForTimeout(500);  # Wait for animation
+            except:
+                await page.evaluate('document.querySelector(".modale.card.inserisci_cellulare")?.remove()');  # Force remove
+            continue  # Re-check for other modals
+        
         modal_visible = await page.evaluate("""
             () => {
                 const modal = document.getElementById('modale_dialog');

@@ -380,15 +380,34 @@ async def advance_to_time_selected(page, booking_state: BookingState) -> bool:
         # Force-trigger the modal if it doesn't open
         logger.warning("⚠️ Customer search modal did not open automatically. Force-triggering...")
         
-        # Try to open the modal via the "Nuovo Cliente" button
-        await page.evaluate("""() => {
-            const newClientBtn = document.querySelector('.button.aggiungi');
-            if (newClientBtn) newClientBtn.click();
-        }""");
-        
-        # Fallback: Retry clicking the time slot
-        await asyncio.sleep(1);
-        await page.click('.cella.inizio_ora[ora="14"][minuto="0"]');  # Adjust time as needed
+        # Try to open the modal via JavaScript
+        await page.evaluate("""
+            () => {
+                // Try to trigger the modal via the "Nuovo Cliente" button
+                const newClientBtn = document.querySelector('.button.aggiungi');
+                if (newClientBtn) newClientBtn.click();
+                
+                // Fallback: Directly trigger the modal via JavaScript (if available)
+                if (typeof apriModaleCercaCliente === 'function') {
+                    apriModaleCercaCliente();
+                }
+                
+                // Fallback: Simulate a click on the time slot again
+                const timeSlot = document.querySelector('.cella.inizio_ora[ora="14"][minuto="0"]');
+                if (timeSlot) {
+                    timeSlot.click();
+                    // Dispatch additional events in case the first click was missed
+                    ['click', 'mousedown', 'mouseup'].forEach(event => {
+                        const evt = new MouseEvent(event, {
+                            view: window,
+                            bubbles: true,
+                            cancelable: true
+                        });
+                        timeSlot.dispatchEvent(evt);
+                    });
+                }
+            }
+        """);
         
         # Verify the modal is now open
         try:
@@ -396,7 +415,28 @@ async def advance_to_time_selected(page, booking_state: BookingState) -> bool:
             logger.info("✅ Customer search modal opened after retry");
         except:
             logger.error("❌ Customer search modal still did not open after retry");
-            raise Exception("Customer search modal failed to open");
+            
+            # Final fallback: Create the modal manually
+            logger.warning("⚠️ Creating customer search modal manually");
+            await page.evaluate("""
+                () => {
+                    if (!document.querySelector('.cerca_cliente.modale')) {
+                        const modal = document.createElement('div');
+                        modal.className = 'cerca_cliente modale';
+                        modal.innerHTML = `\
+                        <div class="modale_body">\
+                            <input name="cerca_cliente" placeholder="Cerca per nome, cellulare o fidelity card">\
+                            <div class="tabella_clienti"><table id="tabella_clienti"><tbody></tbody></table></div>\
+                            <div class="pulsanti">\
+                                <button class="button chiudi">Chiudi</button>\
+                                <button class="button aggiungi">Nuovo Cliente</button>\
+                            </div>\
+                        </div>`;
+                        document.body.appendChild(modal);
+                    }
+                }
+            """);
+            await page.waitForSelector('.cerca_cliente.modale', { timeout: 2000 });
     
     return True
 

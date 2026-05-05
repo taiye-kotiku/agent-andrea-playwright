@@ -268,6 +268,23 @@ async def advance_to_time_selected(page, booking_state: BookingState) -> bool:
     actual_time = f"{hour}:{minute}"
     clicked_operator_id = preferred_op_id
 
+    def click_slot(sel):
+        """Helper to scroll to and click a time slot using JavaScript events."""
+        return f"""
+            (s) => {{
+                const el = document.querySelector(s);
+                if (el) {{
+                    el.scrollIntoView({{block:'center'}});
+                    const rect = el.getBoundingClientRect();
+                    const cx = rect.left + rect.width/2;
+                    const cy = rect.top + rect.height/2;
+                    ['pointerdown','pointerup','mousedown','mouseup','click'].forEach(type => {{
+                        el.dispatchEvent(new MouseEvent(type, {{view:window,bubbles:true,cancelable:true,clientX:cx,clientY:cy}}));
+                    }});
+                }}
+            }}
+        """
+
     if preferred_op_id:
         logger.info(f"Trying specific operator slot for id_operatore={preferred_op_id}")
         try:
@@ -275,7 +292,7 @@ async def advance_to_time_selected(page, booking_state: BookingState) -> bool:
             count = await page.evaluate(f"() => document.querySelectorAll(\"{sel}\").length")
             logger.info(f"Specific op exact count: {count}")
             if count > 0:
-                await page.click(sel, timeout=5000)
+                await page.evaluate(click_slot(sel), sel)
                 clicked = True
                 clicked_operator_id = preferred_op_id
                 logger.info(f"✅ Clicked exact slot for preferred operator {preferred_op_id}")
@@ -289,7 +306,7 @@ async def advance_to_time_selected(page, booking_state: BookingState) -> bool:
                 logger.info(f"Specific op hour count: {count}")
                 if count > 0:
                     actual_min = await page.evaluate(f"() => {{ const c = document.querySelector(\"{sel}\"); return c ? c.getAttribute('minuto') : null; }}")
-                    await page.click(sel, timeout=5000)
+                    await page.evaluate(click_slot(sel), sel)
                     actual_time = f"{hour}:{actual_min or '0'}"
                     clicked = True
                     clicked_operator_id = preferred_op_id
@@ -304,7 +321,7 @@ async def advance_to_time_selected(page, booking_state: BookingState) -> bool:
                     count = await page.evaluate(f"() => document.querySelectorAll(\"{sel}\").length")
                     if count > 0:
                         actual_min = await page.evaluate(f"() => {{ const c = document.querySelector(\"{sel}\"); return c ? c.getAttribute('minuto') : '0'; }}")
-                        await page.click(sel, timeout=5000)
+                        await page.evaluate(click_slot(sel), sel)
                         actual_time = f"{try_hour}:{actual_min}"
                         clicked = True
                         clicked_operator_id = preferred_op_id
@@ -324,7 +341,8 @@ async def advance_to_time_selected(page, booking_state: BookingState) -> bool:
             logger.info(f"Any-op exact count: {count}")
             if count > 0:
                 clicked_operator_id = await page.evaluate(f"() => {{ const c = document.querySelector(\"{sel}\"); return c ? c.getAttribute('id_operatore') : null; }}")
-                await page.click(sel, timeout=5000)
+                logger.info(f"✅ First available operator: {clicked_operator_id}")
+                await page.evaluate(click_slot(sel), sel)
                 clicked = True
                 logger.info(f"✅ Clicked exact slot for first available operator {clicked_operator_id}")
         except Exception as e:
@@ -337,7 +355,7 @@ async def advance_to_time_selected(page, booking_state: BookingState) -> bool:
                 logger.info(f"Any-op hour count: {count}")
                 if count > 0:
                     result = await page.evaluate(f"() => {{ const c = document.querySelector(\"{sel}\"); return c ? {{minuto: c.getAttribute('minuto'), op: c.getAttribute('id_operatore')}} : null; }}")
-                    await page.click(sel, timeout=5000)
+                    await page.evaluate(click_slot(sel), sel)
                     actual_time = f"{hour}:{result['minuto'] if result else '0'}"
                     clicked_operator_id = result['op'] if result else None
                     clicked = True
@@ -352,7 +370,7 @@ async def advance_to_time_selected(page, booking_state: BookingState) -> bool:
                     count = await page.evaluate(f"() => document.querySelectorAll(\"{sel}\").length")
                     if count > 0:
                         result = await page.evaluate(f"() => {{ const c = document.querySelector(\"{sel}\"); return c ? {{minuto: c.getAttribute('minuto'), op: c.getAttribute('id_operatore')}} : null; }}")
-                        await page.click(sel, timeout=5000)
+                        await page.evaluate(click_slot(sel), sel)
                         actual_time = f"{try_hour}:{result['minuto'] if result else '0'}"
                         clicked_operator_id = result['op'] if result else None
                         clicked = True

@@ -2,6 +2,6 @@ fastapi
 uvicorn
 pydantic
 pydantic-settings
-python-dotenv==1.0.0
+python-dotenv
 browser-use==0.12.6
 playwright

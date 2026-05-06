@@ -250,6 +250,28 @@ async def clear_debug():
     return {"success": True, "message": "Debug data cleared"}
 
 
+@app.post("/book-ai")
+async def book_with_ai(request: Request, booking: BookingRequest):
+    """Book an appointment using browser-use AI agent (end-to-end in one call)."""
+    auth = request.headers.get("Authorization") or request.headers.get("authorization") or ""
+    if auth != f"Bearer {API_SECRET}":
+        raise HTTPException(status_code=401, detail="Unauthorized")
+
+    logger.info(f"🤖 AI Booking: {booking.customer_name} | {booking.services or booking.service} | {booking.preferred_date} {booking.preferred_time}")
+
+    from booking_ai import run_booking
+    result = await run_booking({
+        "customer_name": booking.customer_name,
+        "caller_phone": booking.caller_phone,
+        "date": booking.preferred_date,
+        "time": booking.preferred_time,
+        "services": booking.services or [booking.service] if booking.service else [],
+        "operator_preference": booking.operator_preference,
+    })
+
+    return result
+
+
 @app.post("/book")
 async def book_appointment(request: Request, booking: BookingRequest):
     auth = request.headers.get("Authorization") or request.headers.get("authorization") or ""

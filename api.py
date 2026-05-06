@@ -764,25 +764,34 @@ async def prepare_live_session_endpoint(request: Request, payload: PrepareLiveSe
         except Exception:
             logger.info("🔥 No warm session in pool, warming on-demand...")
             from session_manager import create_and_warm_pool_session, wegest_pool, pool_lock, POOL_SIZE, reset_pool_session
+            
+            # Decide which pool_id to create (brief lock, no slow ops)
+            pool_id_to_create = None
+            needs_reset = False
             async with pool_lock:
                 for i in range(1, POOL_SIZE + 1):
                     pool_id = f"pool_{i}"
                     existing = wegest_pool.get(pool_id)
                     if existing and (not existing.page or existing.page.is_closed()):
-                        await reset_pool_session(pool_id)
-                        await create_and_warm_pool_session(pool_id)
+                        pool_id_to_create = pool_id
+                        needs_reset = True
                         break
                     elif not existing:
-                        await create_and_warm_pool_session(pool_id)
+                        pool_id_to_create = pool_id
                         break
                     elif existing.assigned_conversation_id != payload.conversation_id:
-                        await reset_pool_session(pool_id)
-                        await create_and_warm_pool_session(pool_id)
+                        pool_id_to_create = pool_id
+                        needs_reset = True
                         break
                 else:
-                    pool_id = f"pool_1"
-                    await reset_pool_session(pool_id)
-                    await create_and_warm_pool_session(pool_id)
+                    pool_id_to_create = "pool_1"
+                    needs_reset = True
+            
+            # Slow ops outside lock (create_and_warm_pool_session/reset_pool_session acquire pool_lock internally)
+            if needs_reset:
+                await reset_pool_session(pool_id_to_create)
+            await create_and_warm_pool_session(pool_id_to_create)
+            
             session = await assign_idle_pool_session_to_conversation(payload.conversation_id)
 
         async with session.lock:

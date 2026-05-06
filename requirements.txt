@@ -3,5 +3,4 @@ uvicorn
 pydantic
 pydantic-settings
 python-dotenv
-browser-use==0.12.6
 playwright

@@ -613,21 +613,23 @@ async def reset_pool_session(pool_id: str):
             await session.context.close()
     except Exception:
         pass
-    try:
-        if session.browser:
-            await session.browser.close()
-    except Exception:
-        pass
-    try:
-        if session.playwright:
-            await session.playwright.stop()
-    except Exception:
-        pass
 
     async with pool_lock:
         wegest_pool.pop(pool_id, None)
 
     logger.info(f"♻️ Pool session reset: {pool_id}")
+
+
+_lightpanda_playwright = None
+_lightpanda_browser = None
+
+
+async def get_lightpanda():
+    global _lightpanda_playwright, _lightpanda_browser
+    if _lightpanda_browser is None:
+        _lightpanda_playwright = await async_playwright().start()
+        _lightpanda_browser = await _lightpanda_playwright.chromium.connect_over_cdp("ws://127.0.0.1:9222")
+    return _lightpanda_browser
 
 
 async def create_and_warm_pool_session(pool_id: str):
@@ -637,27 +639,18 @@ async def create_and_warm_pool_session(pool_id: str):
 
     session = WegestPoolSession(id=pool_id)
 
-    p = await async_playwright().start()
-    browser = await p.chromium.launch(
-        headless=True,
-        args=[
-            "--no-sandbox",
-            "--disable-setuid-sandbox",
-            "--disable-dev-shm-usage",
-            "--disable-gpu",
-            "--disable-background-timer-throttling",
-            "--disable-renderer-backgrounding",
-            "--disable-extensions",
-            "--single-process",
-            "--disable-web-security",
-            "--js-flags=--max-old-space-size=128"
-        ]
-    )
-    context = await browser.new_context(
+    lightpanda = await get_lightpanda()
+    context = await lightpanda.new_context(
         viewport={"width": 1024, "height": 768},
         user_agent="Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 Chrome/120.0.0.0 Safari/537.36"
     )
     page = await context.new_page()
+
+    session.playwright = None
+    session.browser = lightpanda
+    session.context = context
+    session.page = page
+    session.last_used_at = datetime.utcnow()
 
     session.playwright = p
     session.browser = browser

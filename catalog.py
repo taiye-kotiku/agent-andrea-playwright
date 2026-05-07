@@ -160,7 +160,16 @@ async def scrape_day_availability_from_page(
             "operators": []
         }
 
-    await page.click(date_selector, timeout=10000)
+    clicked = await page.evaluate(f"""
+        () => {{
+            const el = document.querySelector("{date_selector}");
+            if (!el) return false;
+            el.click();
+            return true;
+        }}
+    """)
+    if not clicked:
+        raise Exception(f"Date {day}/{month}/{year} not found on calendar")
 
     try:
         await page.wait_for_function(
@@ -176,7 +185,16 @@ async def scrape_day_availability_from_page(
                 });
             }
         """)
-        await page.click(date_selector, timeout=5000)
+        clicked = await page.evaluate(f"""
+            () => {{
+                const el = document.querySelector("{date_selector}");
+                if (!el) return false;
+                el.click();
+                return true;
+            }}
+        """)
+        if not clicked:
+            raise Exception(f"Date {day}/{month}/{year} not found on calendar after retry")
         await page.wait_for_timeout(3000)
 
     await page.wait_for_timeout(1500)

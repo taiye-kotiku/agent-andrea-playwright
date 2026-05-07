@@ -179,10 +179,17 @@ async def advance_to_date_selected(page, booking_state: BookingState) -> bool:
 
     await dismiss_system_modals(page, "before-date")
 
-    try:
-        await page.click(date_selector, timeout=10000)
+    clicked = await page.evaluate(f"""
+        () => {{
+            const el = document.querySelector("{date_selector}");
+            if (!el) return false;
+            el.click();
+            return true;
+        }}
+    """)
+    if clicked:
         logger.info(f"✅ Date clicked: {day}/{month}/{year}")
-    except Exception:
+    else:
         raise Exception(f"Date {day}/{month}/{year} not found on calendar")
 
     try:
@@ -199,7 +206,16 @@ document.querySelectorAll('.modale_overlay, .overlay_modale, .overlay, #modale_s
 });
             }
         """)
-        await page.click(date_selector, timeout=5000)
+        clicked = await page.evaluate(f"""
+            () => {{
+                const el = document.querySelector("{date_selector}");
+                if (!el) return false;
+                el.click();
+                return true;
+            }}
+        """)
+        if not clicked:
+            raise Exception(f"Date {day}/{month}/{year} not found on calendar after retry")
         await page.wait_for_timeout(5000)
 
     await page.wait_for_timeout(2000)

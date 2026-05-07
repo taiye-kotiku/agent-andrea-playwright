@@ -175,8 +175,7 @@ async def ensure_wegest_logged_in(conversation_id: str):
     page = session.page
 
     logger.info(f"🔐 Logging into Wegest session for {conversation_id}...")
-    await page.goto(LOGIN_URL, wait_until="domcontentloaded", timeout=90000)
-    await page.wait_for_selector("input[name='username']", timeout=10000)
+    await navigate_to_login(page, LOGIN_URL, f"session-{conversation_id}")
 
     await page.fill("input[name='username']", WEGEST_USER)
     await page.fill("input[name='password']", WEGEST_PASSWORD)
@@ -627,6 +626,16 @@ async def get_lightpanda():
     return _lightpanda_browser
 
 
+async def navigate_to_login(page, login_url: str, label: str = ""):
+    """Navigate to Wegest login even when Lightpanda never emits domcontentloaded."""
+    try:
+        await page.goto(login_url, wait_until="domcontentloaded", timeout=30000)
+    except Exception as e:
+        logger.warning(f"Login navigation did not reach domcontentloaded ({label}): {e}")
+
+    await page.wait_for_selector("input[name='username']", timeout=60000)
+
+
 async def create_lightpanda_page():
     """Create a fresh page while reusing Lightpanda's single browser context."""
     lightpanda = await get_lightpanda()
@@ -666,8 +675,7 @@ async def create_and_warm_pool_session(pool_id: str):
 
     logger.info(f"🔥 Warming pool session {pool_id}...")
 
-    await page.goto(LOGIN_URL, wait_until="domcontentloaded", timeout=90000)
-    await page.wait_for_selector("input[name='username']", timeout=10000)
+    await navigate_to_login(page, LOGIN_URL, pool_id)
 
     await page.fill("input[name='username']", WEGEST_USER)
     await page.fill("input[name='password']", WEGEST_PASSWORD)
@@ -940,7 +948,7 @@ __all__ = [
     "is_wegest_session_alive", "ensure_wegest_browser", "ensure_wegest_logged_in",
     "dismiss_system_modals", "adaptive_modal_scan",
     "get_assigned_pool_session", "assign_idle_pool_session_to_conversation",
-    "reset_pool_session", "create_lightpanda_page", "create_and_warm_pool_session", "warm_pool_on_startup",
+    "reset_pool_session", "navigate_to_login", "create_lightpanda_page", "create_and_warm_pool_session", "warm_pool_on_startup",
     "ensure_pool_healthy", "get_live_session_for_conversation",
     "cleanup_idle_wegest_sessions", "cleanup_idle_pool_sessions",
     "ensure_clean_agenda", "return_session_to_pool", "check_and_return_idle_sessions"

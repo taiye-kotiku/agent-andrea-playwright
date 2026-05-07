@@ -54,7 +54,7 @@ DEBUG_SCREENSHOTS=false
 PORT=8000
 HOST=0.0.0.0
 
-# Playwright
+# Lightpanda/CDP
 PLAYWRIGHT_HEADLESS=true
 PLAYWRIGHT_TIMEOUT=30000
 ```
@@ -203,7 +203,6 @@ git pull origin main
 cd /opt/agent-andrea-playwright
 source venv/bin/activate
 pip install -r requirements.txt
-playwright install chromium
 ```
 
 ### Restart Service

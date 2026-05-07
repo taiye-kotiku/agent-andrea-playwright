@@ -55,6 +55,7 @@ async def dump_html(page, name: str, force: bool = False):
 # Alias for WegestSession and WegestPoolSession from config
 from config import WegestSession as WegestSession
 from config import WegestPoolSession as WegestPoolSession
+from config import BookingState as BookingState
 
 
 async def get_or_create_wegest_session(conversation_id: str) -> 'WegestSession':
@@ -575,6 +576,8 @@ async def assign_idle_pool_session_to_conversation(conversation_id: str) -> 'Weg
                 session.in_use = True
                 session.assigned_conversation_id = conversation_id
                 session.last_used_at = datetime.utcnow()
+                session.booking_state = BookingState()
+                session.previous_booking_state = None
                 conversation_to_pool_session[conversation_id] = pool_id
                 logger.info(f"🔗 Assigned {pool_id} to conversation {conversation_id}")
                 return session
@@ -738,6 +741,66 @@ async def get_live_session_for_conversation(conversation_id: str):
     return await assign_idle_pool_session_to_conversation(conversation_id)
 
 
+async def ensure_clean_agenda(page, label: str = "") -> dict:
+    """Return a reused Wegest page to a clean agenda surface before new work."""
+    cleanup = await page.evaluate("""
+        () => {
+            const hidden = [];
+            document.querySelectorAll('.form_cliente, .cerca_cliente.modale, .form_appuntamento').forEach(el => {
+                if (getComputedStyle(el).display !== 'none') {
+                    hidden.push(el.id ? `#${el.id}` : '.' + Array.from(el.classList).join('.'));
+                    el.style.display = 'none';
+                }
+            });
+            document.querySelectorAll('.modale_overlay, .overlay_modale, .overlay, .sfondo, #modale_sfondo, .agenda_modale_sfondo').forEach(el => {
+                if (getComputedStyle(el).display !== 'none') {
+                    hidden.push(el.id ? `#${el.id}` : '.' + Array.from(el.classList).join('.'));
+                    el.style.display = 'none';
+                }
+            });
+            return hidden;
+        }
+    """)
+    if cleanup:
+        logger.info(f"🧹 Clean agenda {label or 'session'} hid: {cleanup}")
+
+    agenda_clicked = await page.evaluate("""
+        () => {
+            const agenda = document.querySelector("[pannello='pannello_agenda']");
+            if (!agenda) return false;
+            agenda.click();
+            return true;
+        }
+    """)
+    if agenda_clicked:
+        await page.wait_for_timeout(1000)
+
+    await dismiss_system_modals(page, f"clean-agenda-{label}" if label else "clean-agenda")
+
+    state = await page.evaluate("""
+        () => {
+            const loginPanel = document.getElementById('pannello_login');
+            const agendaPanel = document.getElementById('pannello_agenda');
+            const agendaBtn = document.querySelector("[pannello='pannello_agenda']");
+            const menu = document.getElementById('menu');
+            const blockingCustomerForm = document.querySelector('.form_cliente');
+            const blockingCustomerSearch = document.querySelector('.cerca_cliente.modale');
+
+            return {
+                loginVisible: loginPanel ? getComputedStyle(loginPanel).display !== 'none' : false,
+                hasAgendaButton: !!agendaBtn,
+                hasMenu: !!menu,
+                agendaVisible: agendaPanel ? getComputedStyle(agendaPanel).display !== 'none' : false,
+                hasVisibleDate: !!document.querySelector('.data[giorno][mese][anno]'),
+                customerFormVisible: blockingCustomerForm ? getComputedStyle(blockingCustomerForm).display !== 'none' : false,
+                customerSearchVisible: blockingCustomerSearch ? getComputedStyle(blockingCustomerSearch).display !== 'none' : false
+            };
+        }
+    """)
+    logger.info(f"🧹 Clean agenda {label or 'session'} state: {state}")
+    return state
+
+
 async def cleanup_idle_wegest_sessions():
     now = datetime.utcnow()
     to_remove = []
@@ -788,6 +851,8 @@ async def return_session_to_pool(conversation_id: str):
         if session:
             session.in_use = False
             session.assigned_conversation_id = None
+            session.booking_state = BookingState()
+            session.previous_booking_state = None
             logger.info(f"↩️ Returned {pool_id} to pool")
 
         conversation_to_pool_session.pop(conversation_id, None)
@@ -856,5 +921,5 @@ __all__ = [
     "reset_pool_session", "create_and_warm_pool_session", "warm_pool_on_startup",
     "ensure_pool_healthy", "get_live_session_for_conversation",
     "cleanup_idle_wegest_sessions", "cleanup_idle_pool_sessions",
-    "return_session_to_pool", "check_and_return_idle_sessions"
+    "ensure_clean_agenda", "return_session_to_pool", "check_and_return_idle_sessions"
 ]

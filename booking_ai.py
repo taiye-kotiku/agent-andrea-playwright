@@ -115,7 +115,7 @@ Complete a booking for:
 
 
 async def run_booking_click(page, click_data: dict) -> dict:
-    """Use browser-use AI to click a time slot on an existing Playwright page."""
+    """Use browser-use AI to click a time slot on an existing Lightpanda-backed CDP page."""
     try:
         cdpt = await page.context.new_cdp_session(page)
         await cdpt.send("Input.dispatchMouseEvent", {

@@ -2,7 +2,7 @@ FROM python:3.11-slim
 
 WORKDIR /app
 
-# Install system deps for Playwright
+# Install system deps for Lightpanda/CDP runtime
 RUN apt-get update && apt-get install -y \
     curl \
     libnss3 libnspr4 libatk1.0-0t64 libatk-bridge2.0-0t64 libcups2t64 \

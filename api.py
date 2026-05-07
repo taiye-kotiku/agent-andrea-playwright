@@ -22,7 +22,7 @@ from api_models import (
 from booking import run_wegest_booking
 from availability import run_availability_check
 from utils import normalize_requested_services, get_missing_booking_fields, load_cache_from_disk
-from session_manager import snap, dump_html, warm_pool_on_startup, cleanup_idle_wegest_sessions, cleanup_idle_pool_sessions, dismiss_system_modals, assign_idle_pool_session_to_conversation, adaptive_modal_scan, return_session_to_pool, check_and_return_idle_sessions
+from session_manager import snap, dump_html, warm_pool_on_startup, cleanup_idle_wegest_sessions, cleanup_idle_pool_sessions, dismiss_system_modals, assign_idle_pool_session_to_conversation, adaptive_modal_scan, ensure_clean_agenda, return_session_to_pool, check_and_return_idle_sessions
 from utils import cleanup_expired_call_states
 from catalog import extract_service_operator_durations_from_page
 from datetime import datetime
@@ -222,7 +222,7 @@ async def view_screenshots():
     if not screenshots:
         return "<h2>No screenshots yet — run a booking first</h2>"
     html = "<html><body style='background:#111;color:#fff;font-family:sans-serif;padding:20px'>"
-    html += "<h1>🎬 Playwright Screenshots</h1>"
+    html += "<h1>🎬 Lightpanda Screenshots</h1>"
     for name, data in screenshots.items():
         html += f"<h3>📸 {name}</h3>"
         html += f"<img src='data:image/png;base64,{data}' style='max-width:100%;border:2px solid #555;margin-bottom:30px;display:block'><br>"
@@ -814,6 +814,10 @@ async def prepare_live_session_endpoint(request: Request, payload: PrepareLiveSe
 
                 if state.get("loginVisible", False) or not (state.get("hasAgendaButton", False) or state.get("hasMenu", False)):
                     raise Exception("Pool session is no longer ready")
+
+                clean_state = await ensure_clean_agenda(session.page, "prepare")
+                if clean_state.get("loginVisible") or clean_state.get("customerFormVisible") or clean_state.get("customerSearchVisible"):
+                    raise Exception(f"Pool session is not clean: {clean_state}")
 
                 session.last_used_at = datetime.utcnow()
 

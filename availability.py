@@ -4,7 +4,7 @@ Availability check logic for Agent Andrea
 
 import config
 from config import logger, API_SECRET, service_catalog, SERVICE_DURATION_FALLBACK
-from session_manager import get_live_session_for_conversation, get_assigned_pool_session, dismiss_system_modals, snap
+from session_manager import get_live_session_for_conversation, get_assigned_pool_session, dismiss_system_modals, ensure_clean_agenda, snap
 from utils import (
     normalize_requested_services,
     compute_valid_start_times,
@@ -231,6 +231,10 @@ async def run_live_availability_check(request: 'AvailabilityRequest') -> dict:
                 raise Exception("Assigned pool session is not ready")
 
             session.last_used_at = datetime.utcnow()
+
+            clean_state = await ensure_clean_agenda(page, "availability")
+            if clean_state.get("loginVisible") or clean_state.get("customerFormVisible") or clean_state.get("customerSearchVisible"):
+                raise Exception(f"Assigned pool session is not clean for availability: {clean_state}")
 
             result = await scrape_day_availability_from_page(
                 page,

@@ -175,7 +175,7 @@ async def ensure_wegest_logged_in(conversation_id: str):
     page = session.page
 
     logger.info(f"🔐 Logging into Wegest session for {conversation_id}...")
-    await page.goto(LOGIN_URL, wait_until="domcontentloaded", timeout=30000)
+    await page.goto(LOGIN_URL, wait_until="domcontentloaded", timeout=90000)
     await page.wait_for_selector("input[name='username']", timeout=10000)
 
     await page.fill("input[name='username']", WEGEST_USER)
@@ -666,7 +666,7 @@ async def create_and_warm_pool_session(pool_id: str):
 
     logger.info(f"🔥 Warming pool session {pool_id}...")
 
-    await page.goto(LOGIN_URL, wait_until="domcontentloaded", timeout=30000)
+    await page.goto(LOGIN_URL, wait_until="domcontentloaded", timeout=90000)
     await page.wait_for_selector("input[name='username']", timeout=10000)
 
     await page.fill("input[name='username']", WEGEST_USER)

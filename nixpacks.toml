@@ -1,8 +1,10 @@
 [phases.setup]
-aptPkgs = ["libgtk-3-0", "libgdk-pixbuf2.0-0", "libnotify4", "libdrm2", "libxkbcommon0", "libgbm1", "libnss3", "libnspr4", "libasound2", "libxshmfence1", "libatk-bridge2.0-0", "libcups2", "libxdamage1", "libxfixes3", "libxrandr2", "libatspi2.0-0", "libxcursor1", "libxi6", "libxtst6", "libpango-1.0-0", "libcairo2", "libegl1", "libwayland-egl1"]
+aptPkgs = ["curl"]
 
 [phases.install]
-cmds = ["python3 -m playwright install chromium"]
+cmds = [
+    "curl -L -o /usr/local/bin/lightpanda https://github.com/lightpanda-io/browser/releases/download/nightly/lightpanda-x86_64-linux && chmod +x /usr/local/bin/lightpanda"
+]
 
 [start]
-cmd = "uvicorn main:app --host 0.0.0.0 --port ${PORT:-8000}"
+cmd = "lightpanda serve --host 0.0.0.0 --port 9222 --obey-robots=false & sleep 2 && uvicorn main:app --host 0.0.0.0 --port ${PORT:-8000}"

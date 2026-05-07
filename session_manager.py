@@ -82,29 +82,14 @@ async def reset_wegest_session(conversation_id: str):
 
     try:
         if session.page:
-            # Lightpanda can hang while closing pages. Reuse the page and
-            # navigate it back to login during warmup instead.
-            pass
+            await session.page.close()
     except Exception:
         pass
     try:
         if session.context:
-            # Lightpanda supports a single browser context. Keep it alive so the
-            # next warmup can reuse the context instead of hitting
-            # Target.createBrowserContext errors.
-            pass
+            await session.context.close()
     except Exception:
         pass
-    if session.playwright is not None:
-        try:
-            if session.browser:
-                await session.browser.close()
-        except Exception:
-            pass
-        try:
-            await session.playwright.stop()
-        except Exception:
-            pass
 
     async with wegest_sessions_lock:
         wegest_sessions.pop(conversation_id, None)
@@ -149,10 +134,10 @@ async def ensure_wegest_browser(conversation_id: str):
     await reset_wegest_session(conversation_id)
     session = await get_or_create_wegest_session(conversation_id)
 
-    lightpanda, context, page = await create_lightpanda_page()
+    browser, context, page = await create_chromium_page()
 
     session.playwright = None
-    session.browser = lightpanda
+    session.browser = browser
     session.context = context
     session.page = page
     session.logged_in = False
@@ -592,17 +577,12 @@ async def reset_pool_session(pool_id: str):
 
     try:
         if session.page:
-            # Lightpanda can hang while closing pages. Reuse the page and
-            # navigate it back to login during warmup instead.
-            pass
+            await session.page.close()
     except Exception:
         pass
     try:
         if session.context:
-            # Lightpanda supports a single browser context. Keep it alive so the
-            # next warmup can reuse the context instead of hitting
-            # Target.createBrowserContext errors.
-            pass
+            await session.context.close()
     except Exception:
         pass
 
@@ -612,50 +592,43 @@ async def reset_pool_session(pool_id: str):
     logger.info(f"♻️ Pool session reset: {pool_id}")
 
 
-_lightpanda_lock = asyncio.Lock()
-_lightpanda_playwright = None
-_lightpanda_browser = None
+_chromium_lock = asyncio.Lock()
+_chromium_playwright = None
+_chromium_browser = None
 
 
-async def get_lightpanda():
-    global _lightpanda_playwright, _lightpanda_browser
-    async with _lightpanda_lock:
-        if _lightpanda_browser is None:
-            _lightpanda_playwright = await async_playwright().start()
-            _lightpanda_browser = await _lightpanda_playwright.chromium.connect_over_cdp("ws://127.0.0.1:9222")
-    return _lightpanda_browser
+async def get_chromium_browser():
+    global _chromium_playwright, _chromium_browser
+    async with _chromium_lock:
+        if _chromium_browser is None or not _chromium_browser.is_connected():
+            _chromium_playwright = await async_playwright().start()
+            headless = os.environ.get("PLAYWRIGHT_HEADLESS", "true").lower() != "false"
+            _chromium_browser = await _chromium_playwright.chromium.launch(
+                headless=headless,
+                args=[
+                    "--no-sandbox",
+                    "--disable-setuid-sandbox",
+                    "--disable-dev-shm-usage",
+                ],
+            )
+    return _chromium_browser
 
 
 async def navigate_to_login(page, login_url: str, label: str = ""):
-    """Navigate to Wegest login without waiting for flaky page lifecycle events."""
-    try:
-        await page.goto(login_url, wait_until="commit", timeout=30000)
-    except Exception as e:
-        logger.warning(f"Login navigation did not commit ({label}): {e}")
-
+    """Navigate to Wegest login and wait for the form to be usable."""
+    await page.goto(login_url, wait_until="domcontentloaded", timeout=90000)
     await page.wait_for_selector("input[name='username']", timeout=60000)
 
 
-async def create_lightpanda_page():
-    """Create a fresh page while reusing Lightpanda's single browser context."""
-    lightpanda = await get_lightpanda()
-
-    if lightpanda.contexts:
-        context = lightpanda.contexts[0]
-        for existing_page in list(context.pages):
-            try:
-                if not existing_page.is_closed():
-                    return lightpanda, context, existing_page
-            except Exception:
-                continue
-    else:
-        context = await lightpanda.new_context(
-            viewport={"width": 1024, "height": 768},
-            user_agent="Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 Chrome/120.0.0.0 Safari/537.36"
-        )
-
+async def create_chromium_page():
+    """Create an isolated Chromium context/page for Wegest automation."""
+    browser = await get_chromium_browser()
+    context = await browser.new_context(
+        viewport={"width": 1024, "height": 768},
+        user_agent="Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 Chrome/120.0.0.0 Safari/537.36",
+    )
     page = await context.new_page()
-    return lightpanda, context, page
+    return browser, context, page
 
 
 async def create_and_warm_pool_session(pool_id: str):
@@ -665,10 +638,10 @@ async def create_and_warm_pool_session(pool_id: str):
 
     session = WegestPoolSession(id=pool_id)
 
-    lightpanda, context, page = await create_lightpanda_page()
+    browser, context, page = await create_chromium_page()
 
     session.playwright = None
-    session.browser = lightpanda
+    session.browser = browser
     session.context = context
     session.page = page
     session.last_used_at = datetime.utcnow()
@@ -948,7 +921,7 @@ __all__ = [
     "is_wegest_session_alive", "ensure_wegest_browser", "ensure_wegest_logged_in",
     "dismiss_system_modals", "adaptive_modal_scan",
     "get_assigned_pool_session", "assign_idle_pool_session_to_conversation",
-    "reset_pool_session", "navigate_to_login", "create_lightpanda_page", "create_and_warm_pool_session", "warm_pool_on_startup",
+    "reset_pool_session", "navigate_to_login", "create_chromium_page", "create_and_warm_pool_session", "warm_pool_on_startup",
     "ensure_pool_healthy", "get_live_session_for_conversation",
     "cleanup_idle_wegest_sessions", "cleanup_idle_pool_sessions",
     "ensure_clean_agenda", "return_session_to_pool", "check_and_return_idle_sessions"

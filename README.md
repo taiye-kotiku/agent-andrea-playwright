@@ -1,6 +1,6 @@
 # Agent Andrea - Wegest Booking Service
 
-Automated booking service for Wegest using Lightpanda and FastAPI.
+Automated booking service for Wegest using Playwright Chromium and FastAPI.
 
 ## Features
 
@@ -36,7 +36,7 @@ agent-andrea-playwright/
 - `api.py` - FastAPI routes (/book, /check-availability, etc.) + startup event
 - `api_models.py` - Pydantic models (BookingRequest, AvailabilityRequest, etc.)
 - `utils.py` - Utility functions, call state CRUD, catalog load/save
-- `session_manager.py` - Lightpanda sessions, pool warming, **pool health monitor**
+- `session_manager.py` - Chromium sessions, pool warming, **pool health monitor**
 - `catalog.py` - Wegest catalog management, page scraping
 - `booking.py` - Booking flow logic
 - `availability.py` - Availability check logic, background refresh
@@ -65,11 +65,10 @@ source venv/bin/activate  # On Windows: venv\Scripts\activate
 3. Install dependencies:
 ```bash
 pip install -r requirements.txt
+python -m playwright install chromium
 ```
 
-4. Install and start Lightpanda's CDP server on port `9222`.
-
-5. Create `.env` file:
+4. Create `.env` file:
 ```bash
 cp .env.example .env
 # Edit .env with your settings

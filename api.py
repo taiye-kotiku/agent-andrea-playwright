@@ -222,7 +222,7 @@ async def view_screenshots():
     if not screenshots:
         return "<h2>No screenshots yet — run a booking first</h2>"
     html = "<html><body style='background:#111;color:#fff;font-family:sans-serif;padding:20px'>"
-    html += "<h1>🎬 Lightpanda Screenshots</h1>"
+    html += "<h1>🎬 Chromium Screenshots</h1>"
     for name, data in screenshots.items():
         html += f"<h3>📸 {name}</h3>"
         html += f"<img src='data:image/png;base64,{data}' style='max-width:100%;border:2px solid #555;margin-bottom:30px;display:block'><br>"

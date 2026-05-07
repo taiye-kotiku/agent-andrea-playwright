@@ -181,7 +181,7 @@ async def ensure_wegest_logged_in(conversation_id: str):
     await page.fill("input[name='password']", WEGEST_PASSWORD)
     await page.evaluate("document.querySelector('input[name=\"codice\"]').value = '1'")
 
-    await page.click("div.button")
+    await page.evaluate("document.querySelector('div.button').click()")
 
     try:
         await page.wait_for_function(
@@ -648,7 +648,7 @@ async def create_and_warm_pool_session(pool_id: str):
     await page.fill("input[name='password']", WEGEST_PASSWORD)
     await page.evaluate("document.querySelector('input[name=\"codice\"]').value = '1'")
 
-    await page.click("div.button")
+    await page.evaluate("document.querySelector('div.button').click()")
 
     try:
         await page.wait_for_function(

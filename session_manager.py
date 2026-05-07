@@ -627,11 +627,11 @@ async def get_lightpanda():
 
 
 async def navigate_to_login(page, login_url: str, label: str = ""):
-    """Navigate to Wegest login even when Lightpanda never emits domcontentloaded."""
+    """Navigate to Wegest login without waiting for flaky page lifecycle events."""
     try:
-        await page.goto(login_url, wait_until="domcontentloaded", timeout=30000)
+        await page.goto(login_url, wait_until="commit", timeout=30000)
     except Exception as e:
-        logger.warning(f"Login navigation did not reach domcontentloaded ({label}): {e}")
+        logger.warning(f"Login navigation did not commit ({label}): {e}")
 
     await page.wait_for_selector("input[name='username']", timeout=60000)
 

@@ -82,7 +82,9 @@ async def reset_wegest_session(conversation_id: str):
 
     try:
         if session.page:
-            await session.page.close()
+            # Lightpanda can hang while closing pages. Reuse the page and
+            # navigate it back to login during warmup instead.
+            pass
     except Exception:
         pass
     try:
@@ -591,7 +593,9 @@ async def reset_pool_session(pool_id: str):
 
     try:
         if session.page:
-            await session.page.close()
+            # Lightpanda can hang while closing pages. Reuse the page and
+            # navigate it back to login during warmup instead.
+            pass
     except Exception:
         pass
     try:
@@ -632,9 +636,9 @@ async def create_lightpanda_page():
         for existing_page in list(context.pages):
             try:
                 if not existing_page.is_closed():
-                    await existing_page.close()
+                    return lightpanda, context, existing_page
             except Exception:
-                pass
+                continue
     else:
         context = await lightpanda.new_context(
             viewport={"width": 1024, "height": 768},

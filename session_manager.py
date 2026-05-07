@@ -675,7 +675,7 @@ async def create_and_warm_pool_session(pool_id: str):
 
     await dismiss_system_modals(page, "post-login")
 
-    await page.click("[pannello='pannello_agenda']")
+    await page.evaluate("document.querySelector(\"[pannello='pannello_agenda']\").click()")
     await page.wait_for_timeout(2000)
     await dismiss_system_modals(page, "after-agenda")
     await page.wait_for_timeout(1000)

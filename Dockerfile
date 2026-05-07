@@ -25,4 +25,4 @@ COPY . .
 EXPOSE 8080 9222
 
 # Start Lightpanda CDP server, then run the app
-CMD ["sh", "-c", "lightpanda serve --host 0.0.0.0 --port 9222 --obey-robots=false & sleep 2 && uvicorn main:app --host 0.0.0.0 --port ${PORT:-8000}"]
+CMD ["sh", "-c", "lightpanda serve --host 0.0.0.0 --port 9222 & sleep 3 && uvicorn main:app --host 0.0.0.0 --port ${PORT:-8000}"]

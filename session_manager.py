@@ -87,7 +87,10 @@ async def reset_wegest_session(conversation_id: str):
         pass
     try:
         if session.context:
-            await session.context.close()
+            # Lightpanda supports a single browser context. Keep it alive so the
+            # next warmup can reuse the context instead of hitting
+            # Target.createBrowserContext errors.
+            pass
     except Exception:
         pass
     if session.playwright is not None:
@@ -144,12 +147,7 @@ async def ensure_wegest_browser(conversation_id: str):
     await reset_wegest_session(conversation_id)
     session = await get_or_create_wegest_session(conversation_id)
 
-    lightpanda = await get_lightpanda()
-    context = await lightpanda.new_context(
-        viewport={"width": 1024, "height": 768},
-        user_agent="Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 Chrome/120.0.0.0 Safari/537.36"
-    )
-    page = await context.new_page()
+    lightpanda, context, page = await create_lightpanda_page()
 
     session.playwright = None
     session.browser = lightpanda
@@ -598,7 +596,10 @@ async def reset_pool_session(pool_id: str):
         pass
     try:
         if session.context:
-            await session.context.close()
+            # Lightpanda supports a single browser context. Keep it alive so the
+            # next warmup can reuse the context instead of hitting
+            # Target.createBrowserContext errors.
+            pass
     except Exception:
         pass
 
@@ -622,6 +623,28 @@ async def get_lightpanda():
     return _lightpanda_browser
 
 
+async def create_lightpanda_page():
+    """Create a fresh page while reusing Lightpanda's single browser context."""
+    lightpanda = await get_lightpanda()
+
+    if lightpanda.contexts:
+        context = lightpanda.contexts[0]
+        for existing_page in list(context.pages):
+            try:
+                if not existing_page.is_closed():
+                    await existing_page.close()
+            except Exception:
+                pass
+    else:
+        context = await lightpanda.new_context(
+            viewport={"width": 1024, "height": 768},
+            user_agent="Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 Chrome/120.0.0.0 Safari/537.36"
+        )
+
+    page = await context.new_page()
+    return lightpanda, context, page
+
+
 async def create_and_warm_pool_session(pool_id: str):
     WEGEST_USER = os.environ.get("WEGEST_USERNAME", "")
     WEGEST_PASSWORD = os.environ.get("WEGEST_PASSWORD", "")
@@ -629,12 +652,7 @@ async def create_and_warm_pool_session(pool_id: str):
 
     session = WegestPoolSession(id=pool_id)
 
-    lightpanda = await get_lightpanda()
-    context = await lightpanda.new_context(
-        viewport={"width": 1024, "height": 768},
-        user_agent="Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 Chrome/120.0.0.0 Safari/537.36"
-    )
-    page = await context.new_page()
+    lightpanda, context, page = await create_lightpanda_page()
 
     session.playwright = None
     session.browser = lightpanda
@@ -918,7 +936,7 @@ __all__ = [
     "is_wegest_session_alive", "ensure_wegest_browser", "ensure_wegest_logged_in",
     "dismiss_system_modals", "adaptive_modal_scan",
     "get_assigned_pool_session", "assign_idle_pool_session_to_conversation",
-    "reset_pool_session", "create_and_warm_pool_session", "warm_pool_on_startup",
+    "reset_pool_session", "create_lightpanda_page", "create_and_warm_pool_session", "warm_pool_on_startup",
     "ensure_pool_healthy", "get_live_session_for_conversation",
     "cleanup_idle_wegest_sessions", "cleanup_idle_pool_sessions",
     "ensure_clean_agenda", "return_session_to_pool", "check_and_return_idle_sessions"
